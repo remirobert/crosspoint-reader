@@ -142,6 +142,7 @@ enum UIIcon {
   Settings,
   Transfer,
   Library,
+  Flashcards,
   Plugins,
   Wifi,
   Hotspot,
@@ -254,6 +255,9 @@ class BaseTheme {
   // grid from this, so hit bands always match the visuals (RoundedRaff derives
   // its row height from the font, not the metrics table).
   virtual int getMenuRowHeight(const GfxRenderer& renderer) const;
+  // Home row height clamped on tall menus so Classic, Lyra, and RoundedRaff
+  // stay clear of the bottom button hints while keeping touch targets aligned.
+  virtual int getHomeMenuRowHeight(const GfxRenderer& renderer, int menuTop, int itemCount) const;
   // Also draws the wall clock opposite the battery when the user enabled
   // SETTINGS.clockShowInHeader and an RTC is present. On touch boards a
   // tappable back button leads the band (see HeaderBackTapTarget); root

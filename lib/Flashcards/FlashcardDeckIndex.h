@@ -5,16 +5,16 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "AnkiTypes.h"
+#include "FlashcardTypes.h"
 
-namespace anki {
+namespace flashcards {
 
-class AnkiDeckIndex {
+class FlashcardDeckIndex {
  public:
-  AnkiDeckIndex() = default;
-  ~AnkiDeckIndex();
-  AnkiDeckIndex(const AnkiDeckIndex&) = delete;
-  AnkiDeckIndex& operator=(const AnkiDeckIndex&) = delete;
+  FlashcardDeckIndex() = default;
+  ~FlashcardDeckIndex();
+  FlashcardDeckIndex(const FlashcardDeckIndex&) = delete;
+  FlashcardDeckIndex& operator=(const FlashcardDeckIndex&) = delete;
 
   static bool ensureDir(const char* dirPath);
 
@@ -25,7 +25,7 @@ class AnkiDeckIndex {
 
   bool readIndexRecord(uint32_t ordinal, CardIndexRecord& out);
   bool readIndexRecords(uint32_t startOrdinal, CardIndexRecord* outBuf, size_t count);
-  bool readCard(uint32_t ordinal, char* lineScratch, size_t scratchSize, AnkiCard& outCard);
+  bool readCard(uint32_t ordinal, char* lineScratch, size_t scratchSize, FlashcardItem& outCard);
 
  private:
   bool tryOpenValidIndex(const char* idxPath, uint32_t actualDeckSize);
@@ -37,4 +37,4 @@ class AnkiDeckIndex {
   bool opened = false;
 };
 
-}  // namespace anki
+}  // namespace flashcards

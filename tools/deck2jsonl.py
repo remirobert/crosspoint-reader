@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert Anki .apkg packages or .tsv/.csv exports into CrossPoint .jsonl decks.
+"""Flashcard deck converter (.apkg, .tsv, .csv -> /flashcards/<deck>.jsonl).
 
 Uses only the Python 3 standard library (zero external dependencies).
 """
@@ -19,7 +19,7 @@ import zipfile
 
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 SQLITE_MAGIC = b"SQLite format 3\x00"
-ANKI_FIELD_SEP = "\x1f"
+NOTE_FIELD_SEP = "\x1f"
 
 DEFAULT_NEW_PER_DAY = 20
 MAX_NEW_PER_DAY = 200
@@ -43,13 +43,12 @@ _MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
 _NONNEG_INT_RE = re.compile(r"\d+")
 
 ZSTD_ACTIONABLE_MESSAGE = (
-    "Detected zstd-compressed Anki database ('collection.anki21b').\n"
-    "apkg2jsonl.py uses only the Python standard library and cannot decompress zstd directly.\n"
+    "Detected zstd-compressed .apkg database ('collection.anki21b').\n"
+    "deck2jsonl.py uses only the Python standard library and cannot decompress zstd directly.\n"
     "How to convert this deck:\n"
-    "  1. Open the deck in Anki Desktop -> File -> Export.\n"
-    "  2. Choose 'Anki Deck Package (.apkg)' and enable 'Support older Anki versions',\n"
-    "     OR export as 'Notes in Plain Text (.txt)' and pass that file to apkg2jsonl.py.\n"
-    "  3. Alternatively, decompress collection.anki21b with the 'zstd' CLI:\n"
+    "  1. Re-export the deck as a legacy uncompressed .apkg package ('collection.anki21' / 'collection.anki2'),\n"
+    "     OR export as plain-text notes (.tsv / .txt) and pass that file to deck2jsonl.py.\n"
+    "  2. Alternatively, decompress collection.anki21b with the 'zstd' CLI:\n"
     "     unzip deck.apkg collection.anki21b && unzstd collection.anki21b -o collection.anki21"
 )
 
@@ -59,7 +58,7 @@ class ConversionError(Exception):
 
 
 def clean_field(raw: str) -> str:
-    """Normalize Anki HTML/media markup into clean UTF-8 plain text."""
+    """Normalize card HTML/media markup into clean UTF-8 plain text."""
     if not raw:
         return ""
     text = raw.replace("\r\n", "\n").replace("\r", "\n")
@@ -256,7 +255,7 @@ def _load_apkg_models(conn: sqlite3.Connection) -> dict[int, list[str]]:
             try:
                 raw_models = json.loads(row[0])
             except json.JSONDecodeError as exc:
-                raise ConversionError(f"Invalid col.models JSON in Anki database: {exc}") from exc
+                raise ConversionError(f"Invalid col.models JSON in .apkg database: {exc}") from exc
             if isinstance(raw_models, dict):
                 for mid_key, model_obj in raw_models.items():
                     if not isinstance(model_obj, dict):
@@ -301,13 +300,13 @@ def _load_apkg_deck_title(conn: sqlite3.Connection) -> str | None:
                     name = str(deck_obj.get("name", "")).strip()
                     did_str = str(deck_obj.get("id", did_key))
                     if name and not (did_str == "1" and name == "Default"):
-                        deck_names.append(name.replace(ANKI_FIELD_SEP, "::"))
+                        deck_names.append(name.replace(NOTE_FIELD_SEP, "::"))
 
     if not deck_names and _table_exists(conn, "decks"):
         for did, name in conn.execute("SELECT id, name FROM decks"):
             clean_name = str(name).strip()
             if clean_name and not (int(did) == 1 and clean_name == "Default"):
-                deck_names.append(clean_name.replace(ANKI_FIELD_SEP, "::"))
+                deck_names.append(clean_name.replace(NOTE_FIELD_SEP, "::"))
 
     if len(deck_names) == 1:
         return deck_names[0]
@@ -349,7 +348,7 @@ def _read_apkg(
                 f"Member '{member_name}' in '{input_path}' is not an uncompressed SQLite 3 database."
             )
 
-        with tempfile.TemporaryDirectory(prefix="apkg2jsonl_") as tmp_dir:
+        with tempfile.TemporaryDirectory(prefix="deck2jsonl_") as tmp_dir:
             db_path = Path(tmp_dir) / member_name
             with zf.open(member_name, "r") as src, db_path.open("wb") as dst:
                 while True:
@@ -379,7 +378,7 @@ def _extract_sqlite_cards(
     extra_spec: str | None,
 ) -> tuple[str | None, list[str]]:
     if not _table_exists(conn, "notes"):
-        raise ConversionError("Anki SQLite database is missing the 'notes' table.")
+        raise ConversionError("Deck SQLite database is missing the 'notes' table.")
 
     models_map = _load_apkg_models(conn)
     detected_title = _load_apkg_deck_title(conn)
@@ -459,7 +458,7 @@ def _extract_sqlite_cards(
     seen_note_pairs: set[tuple[int, str, str]] = set()
 
     for card_id, note_id, guid, mid, flds_str in rows:
-        fields = str(flds_str).split(ANKI_FIELD_SEP)
+        fields = str(flds_str).split(NOTE_FIELD_SEP)
         f_idx, b_idx, h_idx, e_idx = resolved_per_mid[int(mid)]
         raw_front = _get_field(fields, f_idx)
         raw_back = _get_field(fields, b_idx)
@@ -503,7 +502,7 @@ _SEPARATOR_ALIASES = {
     "space": " ",
 }
 
-_ANKI_DIRECTIVE_PREFIXES = (
+_EXPORT_DIRECTIVE_PREFIXES = (
     "#separator:",
     "#html:",
     "#tags column:",
@@ -521,7 +520,7 @@ def _is_preamble_comment(line: str, default_delim: str) -> bool:
     if not stripped.startswith("#"):
         return False
     lower = stripped.lower()
-    if lower.startswith(_ANKI_DIRECTIVE_PREFIXES):
+    if lower.startswith(_EXPORT_DIRECTIVE_PREFIXES):
         return True
     return default_delim not in stripped
 
@@ -607,7 +606,7 @@ def _read_delimited(
         header_names = [c.strip() for c in rows[0]]
         rows = rows[1:]
 
-    # Determine default front/back column indices (accounting for Anki #guid/#notetype/#deck prefix columns).
+    # Determine default front/back column indices (accounting for #guid/#notetype/#deck prefix columns).
     col_upper = max((len(r) for r in rows), default=len(header_names)) + len(metadata_prefix_cols) + 4
     content_cols = [idx for idx in range(col_upper) if idx not in metadata_prefix_cols]
     default_front_str = str(content_cols[0])
@@ -773,10 +772,9 @@ def _validate_field_arg(value: str) -> str:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="apkg2jsonl.py",
+        prog="deck2jsonl.py",
         description=(
-            "Convert Anki .apkg packages (collection.anki21 / collection.anki2) or "
-            ".tsv / .csv plain-text exports into CrossPoint /anki/<deck>.jsonl format."
+            "Flashcard deck converter (.apkg, .tsv, .csv -> /flashcards/<deck>.jsonl)."
         ),
     )
     parser.add_argument(
@@ -801,7 +799,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--title",
         type=str,
         default=None,
-        help="Deck display title for _meta (defaults to Anki deck name or input filename stem).",
+        help="Deck display title for _meta (defaults to package deck name or input filename stem).",
     )
     parser.add_argument(
         "--new-per-day",
@@ -819,25 +817,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--front-field",
         type=_validate_field_arg,
         default=None,
-        help="Front field by 0-based index or Anki model/CSV field name (default: 0).",
+        help="Front field by 0-based index or model/CSV field name (default: 0).",
     )
     parser.add_argument(
         "--back-field",
         type=_validate_field_arg,
         default=None,
-        help="Back field by 0-based index or Anki model/CSV field name (default: 1).",
+        help="Back field by 0-based index or model/CSV field name (default: 1).",
     )
     parser.add_argument(
         "--hint-field",
         type=_validate_field_arg,
         default=None,
-        help="Optional hint field by 0-based index or Anki model/CSV field name.",
+        help="Optional hint field by 0-based index or model/CSV field name.",
     )
     parser.add_argument(
         "--extra-field",
         type=_validate_field_arg,
         default=None,
-        help="Optional extra/notes field by 0-based index or Anki model/CSV field name.",
+        help="Optional extra/notes field by 0-based index or model/CSV field name.",
     )
     parser.add_argument(
         "--id-field",

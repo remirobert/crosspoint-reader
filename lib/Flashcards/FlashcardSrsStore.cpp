@@ -1,4 +1,4 @@
-#include "AnkiSrsStore.h"
+#include "FlashcardSrsStore.h"
 
 #include <HalStorage.h>
 #include <Logging.h>
@@ -10,13 +10,13 @@
 #include <cstring>
 #include <limits>
 
-#include "AnkiDeckIndex.h"
+#include "FlashcardDeckIndex.h"
 
-namespace anki {
+namespace flashcards {
 
 namespace {
 
-constexpr const char* DEFAULT_CACHE_DIR = "/.crosspoint/anki";
+constexpr const char* DEFAULT_CACHE_DIR = "/.crosspoint/flashcards";
 
 bool ensureFileParentDir(const std::string& filePath) {
   const size_t slash = filePath.find_last_of('/');
@@ -24,13 +24,13 @@ bool ensureFileParentDir(const std::string& filePath) {
     return true;
   }
   const std::string parent = filePath.substr(0, slash);
-  return AnkiDeckIndex::ensureDir(parent.c_str());
+  return FlashcardDeckIndex::ensureDir(parent.c_str());
 }
 
 }  // namespace
 
-void AnkiSrsStore::buildPaths(const char* cacheDir, std::string_view deckPath, std::string& idxPath,
-                              std::string& srsOutPath, std::string& walOutPath) {
+void FlashcardSrsStore::buildPaths(const char* cacheDir, std::string_view deckPath, std::string& idxPath,
+                                   std::string& srsOutPath, std::string& walOutPath) {
   std::string_view dir =
       (cacheDir && cacheDir[0] != '\0') ? std::string_view(cacheDir) : std::string_view(DEFAULT_CACHE_DIR);
   while (dir.size() > 1 && dir.back() == '/') {
@@ -62,7 +62,7 @@ void AnkiSrsStore::buildPaths(const char* cacheDir, std::string_view deckPath, s
   appendBase(walOutPath, ".wal");
 }
 
-bool AnkiSrsStore::resetDeck(const char* cacheDir, std::string_view deckPath) {
+bool FlashcardSrsStore::resetDeck(const char* cacheDir, std::string_view deckPath) {
   std::string idxPath;
   std::string srsFilePath;
   std::string walFilePath;
@@ -70,17 +70,17 @@ bool AnkiSrsStore::resetDeck(const char* cacheDir, std::string_view deckPath) {
 
   bool ok = true;
   if (Storage.exists(srsFilePath.c_str()) && !Storage.remove(srsFilePath.c_str())) {
-    LOG_ERR("ANKI", "Failed to remove SRS file %s during deck reset", srsFilePath.c_str());
+    LOG_ERR("FCARD", "Failed to remove SRS file %s during deck reset", srsFilePath.c_str());
     ok = false;
   }
   if (Storage.exists(walFilePath.c_str()) && !Storage.remove(walFilePath.c_str())) {
-    LOG_ERR("ANKI", "Failed to remove WAL file %s during deck reset", walFilePath.c_str());
+    LOG_ERR("FCARD", "Failed to remove WAL file %s during deck reset", walFilePath.c_str());
     ok = false;
   }
   return ok;
 }
 
-void AnkiSrsStore::clear() {
+void FlashcardSrsStore::clear() {
   head = SrsFileHeader{};
   sortedRecords.clear();
   shrinkToFit(sortedRecords);
@@ -89,11 +89,11 @@ void AnkiSrsStore::clear() {
   walSizeBytes = 0;
 }
 
-bool AnkiSrsStore::hasUncompactedWal() const {
+bool FlashcardSrsStore::hasUncompactedWal() const {
   return walSizeBytes > 0 || (!walPath.empty() && Storage.exists(walPath.c_str()));
 }
 
-const CardSrsRecord* AnkiSrsStore::findCard(uint64_t cardIdHash) const {
+const CardSrsRecord* FlashcardSrsStore::findCard(uint64_t cardIdHash) const {
   const auto it = std::lower_bound(sortedRecords.begin(), sortedRecords.end(), cardIdHash,
                                    [](const CardSrsRecord& rec, uint64_t target) { return rec.cardIdHash < target; });
   if (it != sortedRecords.end() && it->cardIdHash == cardIdHash) {
@@ -102,7 +102,7 @@ const CardSrsRecord* AnkiSrsStore::findCard(uint64_t cardIdHash) const {
   return nullptr;
 }
 
-bool AnkiSrsStore::reserveRecordsChecked(size_t targetCapacity) {
+bool FlashcardSrsStore::reserveRecordsChecked(size_t targetCapacity) {
   const size_t clamped = std::min<size_t>(MAX_SRS_RECORDS, targetCapacity);
   if (clamped <= sortedRecords.capacity()) {
     return true;
@@ -110,7 +110,7 @@ bool AnkiSrsStore::reserveRecordsChecked(size_t targetCapacity) {
   const size_t bytes = clamped * sizeof(CardSrsRecord);
   auto probe = makeUniqueNoThrow<uint8_t[]>(bytes);
   if (!probe) {
-    LOG_ERR("ANKI", "OOM reserving %u SRS records (%u B)", static_cast<unsigned>(clamped),
+    LOG_ERR("FCARD", "OOM reserving %u SRS records (%u B)", static_cast<unsigned>(clamped),
             static_cast<unsigned>(bytes));
     return false;
   }
@@ -119,14 +119,14 @@ bool AnkiSrsStore::reserveRecordsChecked(size_t targetCapacity) {
   return true;
 }
 
-bool AnkiSrsStore::ensureUpsertCapacity(uint64_t cardIdHash) {
+bool FlashcardSrsStore::ensureUpsertCapacity(uint64_t cardIdHash) {
   const auto it = std::lower_bound(sortedRecords.begin(), sortedRecords.end(), cardIdHash,
                                    [](const CardSrsRecord& rec, uint64_t target) { return rec.cardIdHash < target; });
   if (it != sortedRecords.end() && it->cardIdHash == cardIdHash) {
     return true;
   }
   if (sortedRecords.size() >= MAX_SRS_RECORDS) {
-    LOG_ERR("ANKI", "SRS record limit (%u) reached", static_cast<unsigned>(MAX_SRS_RECORDS));
+    LOG_ERR("FCARD", "SRS record limit (%u) reached", static_cast<unsigned>(MAX_SRS_RECORDS));
     return false;
   }
   if (sortedRecords.size() < sortedRecords.capacity()) {
@@ -136,7 +136,7 @@ bool AnkiSrsStore::ensureUpsertCapacity(uint64_t cardIdHash) {
   return reserveRecordsChecked(sortedRecords.size() + step);
 }
 
-bool AnkiSrsStore::upsertRecordInMemory(const CardSrsRecord& record) {
+bool FlashcardSrsStore::upsertRecordInMemory(const CardSrsRecord& record) {
   if (!ensureUpsertCapacity(record.cardIdHash)) {
     return false;
   }
@@ -150,7 +150,7 @@ bool AnkiSrsStore::upsertRecordInMemory(const CardSrsRecord& record) {
   return true;
 }
 
-bool AnkiSrsStore::applyWalEntry(const WalEntry& entry) {
+bool FlashcardSrsStore::applyWalEntry(const WalEntry& entry) {
   switch (static_cast<WalOp>(entry.op)) {
     case WalOp::CardRated:
       if (!upsertRecordInMemory(entry.card)) {
@@ -188,7 +188,7 @@ bool AnkiSrsStore::applyWalEntry(const WalEntry& entry) {
   return false;
 }
 
-bool AnkiSrsStore::loadSrsSnapshot(const char* srsFilePath, size_t extraCapacityHint) {
+bool FlashcardSrsStore::loadSrsSnapshot(const char* srsFilePath, size_t extraCapacityHint) {
   if (!Storage.exists(srsFilePath)) {
     if (extraCapacityHint > 0) {
       return reserveRecordsChecked(extraCapacityHint);
@@ -197,14 +197,14 @@ bool AnkiSrsStore::loadSrsSnapshot(const char* srsFilePath, size_t extraCapacity
   }
 
   HalFile srsFile;
-  if (!Storage.openFileForRead("ANKI", srsFilePath, srsFile)) {
-    LOG_ERR("ANKI", "Failed to open SRS file %s", srsFilePath);
+  if (!Storage.openFileForRead("FCARD", srsFilePath, srsFile)) {
+    LOG_ERR("FCARD", "Failed to open SRS file %s", srsFilePath);
     return false;
   }
 
   SrsFileHeader diskHead{};
   if (!serialization::tryReadPod(srsFile, diskHead)) {
-    LOG_ERR("ANKI", "Truncated SRS header in %s", srsFilePath);
+    LOG_ERR("FCARD", "Truncated SRS header in %s", srsFilePath);
     srsFile.close();
     return false;
   }
@@ -213,7 +213,7 @@ bool AnkiSrsStore::loadSrsSnapshot(const char* srsFilePath, size_t extraCapacity
       sizeof(SrsFileHeader) + static_cast<uint64_t>(diskHead.recordCount) * sizeof(CardSrsRecord);
   if (diskHead.magic != SRS_FILE_MAGIC || diskHead.version != SRS_FILE_VERSION ||
       diskHead.recordCount > MAX_SRS_RECORDS || expectedBytes != static_cast<uint64_t>(srsFile.size())) {
-    LOG_ERR("ANKI", "Invalid SRS header or size mismatch in %s", srsFilePath);
+    LOG_ERR("FCARD", "Invalid SRS header or size mismatch in %s", srsFilePath);
     srsFile.close();
     return false;
   }
@@ -228,7 +228,7 @@ bool AnkiSrsStore::loadSrsSnapshot(const char* srsFilePath, size_t extraCapacity
   for (uint32_t i = 0; i < diskHead.recordCount; ++i) {
     CardSrsRecord rec{};
     if (!serialization::tryReadPod(srsFile, rec)) {
-      LOG_ERR("ANKI", "Short read in SRS records of %s at index %u", srsFilePath, static_cast<unsigned>(i));
+      LOG_ERR("FCARD", "Short read in SRS records of %s at index %u", srsFilePath, static_cast<unsigned>(i));
       srsFile.close();
       return false;
     }
@@ -249,14 +249,14 @@ bool AnkiSrsStore::loadSrsSnapshot(const char* srsFilePath, size_t extraCapacity
   return true;
 }
 
-bool AnkiSrsStore::replayWal(const char* walFilePath) {
+bool FlashcardSrsStore::replayWal(const char* walFilePath) {
   if (!Storage.exists(walFilePath)) {
     return true;
   }
 
   HalFile walFile;
-  if (!Storage.openFileForRead("ANKI", walFilePath, walFile)) {
-    LOG_ERR("ANKI", "Failed to open WAL file %s", walFilePath);
+  if (!Storage.openFileForRead("FCARD", walFilePath, walFile)) {
+    LOG_ERR("FCARD", "Failed to open WAL file %s", walFilePath);
     return false;
   }
 
@@ -270,12 +270,12 @@ bool AnkiSrsStore::replayWal(const char* walFilePath) {
       corruptTail = true;
       break;
     }
-    const uint32_t expectedCrc = crc32Anki(&entry, offsetof(WalEntry, crc32));
+    const uint32_t expectedCrc = crc32Flashcards(&entry, offsetof(WalEntry, crc32));
     const bool validOp = (entry.op == static_cast<uint8_t>(WalOp::CardRated) ||
                           entry.op == static_cast<uint8_t>(WalOp::SessionComplete) ||
                           entry.op == static_cast<uint8_t>(WalOp::SessionAdvance));
     if (entry.crc32 != expectedCrc || !validOp) {
-      LOG_ERR("ANKI", "Corrupt WAL frame at offset %u in %s; recovering prefix", static_cast<unsigned>(validBytes),
+      LOG_ERR("FCARD", "Corrupt WAL frame at offset %u in %s; recovering prefix", static_cast<unsigned>(validBytes),
               walFilePath);
       corruptTail = true;
       break;
@@ -288,7 +288,7 @@ bool AnkiSrsStore::replayWal(const char* walFilePath) {
   }
 
   if (validBytes < totalWalBytes && !corruptTail) {
-    LOG_ERR("ANKI", "Partial trailing WAL frame (%u trailing bytes) in %s; recovering prefix",
+    LOG_ERR("FCARD", "Partial trailing WAL frame (%u trailing bytes) in %s; recovering prefix",
             static_cast<unsigned>(totalWalBytes - validBytes), walFilePath);
     corruptTail = true;
   }
@@ -303,9 +303,9 @@ bool AnkiSrsStore::replayWal(const char* walFilePath) {
   return true;
 }
 
-bool AnkiSrsStore::load(const char* srsFilePath, const char* walFilePath, size_t extraCapacityHint) {
+bool FlashcardSrsStore::load(const char* srsFilePath, const char* walFilePath, size_t extraCapacityHint) {
   if (!srsFilePath || srsFilePath[0] == '\0' || !walFilePath || walFilePath[0] == '\0') {
-    LOG_ERR("ANKI", "Invalid SRS or WAL path");
+    LOG_ERR("FCARD", "Invalid SRS or WAL path");
     return false;
   }
 
@@ -318,9 +318,9 @@ bool AnkiSrsStore::load(const char* srsFilePath, const char* walFilePath, size_t
   return loadSrsSnapshot(srsFilePath, extraCapacityHint) && replayWal(walFilePath);
 }
 
-bool AnkiSrsStore::appendWalEntry(const WalEntry& entry) {
+bool FlashcardSrsStore::appendWalEntry(const WalEntry& entry) {
   if (walPath.empty()) {
-    LOG_ERR("ANKI", "Cannot append WAL entry: store not loaded");
+    LOG_ERR("FCARD", "Cannot append WAL entry: store not loaded");
     return false;
   }
   if (!ensureFileParentDir(walPath)) {
@@ -329,12 +329,12 @@ bool AnkiSrsStore::appendWalEntry(const WalEntry& entry) {
 
   HalFile walFile = Storage.open(walPath.c_str(), O_WRONLY | O_CREAT | O_APPEND);
   if (!walFile) {
-    LOG_ERR("ANKI", "Failed to open WAL %s for append", walPath.c_str());
+    LOG_ERR("FCARD", "Failed to open WAL %s for append", walPath.c_str());
     return false;
   }
 
   if (!serialization::tryWritePod(walFile, entry)) {
-    LOG_ERR("ANKI", "Failed to write 32-byte WAL frame to %s", walPath.c_str());
+    LOG_ERR("FCARD", "Failed to write 32-byte WAL frame to %s", walPath.c_str());
     walFile.close();
     return false;
   }
@@ -342,7 +342,7 @@ bool AnkiSrsStore::appendWalEntry(const WalEntry& entry) {
   walFile.flush();
   const size_t updatedSize = walFile.size();
   if (!walFile.close()) {
-    LOG_ERR("ANKI", "Failed closing WAL %s after append", walPath.c_str());
+    LOG_ERR("FCARD", "Failed closing WAL %s after append", walPath.c_str());
     return false;
   }
 
@@ -350,7 +350,7 @@ bool AnkiSrsStore::appendWalEntry(const WalEntry& entry) {
   return true;
 }
 
-bool AnkiSrsStore::recordRating(const CardSrsRecord& updated, bool wasNewCard) {
+bool FlashcardSrsStore::recordRating(const CardSrsRecord& updated, bool wasNewCard) {
   CardSrsRecord cleanCard = updated;
   std::memset(cleanCard.reserved, 0, sizeof(cleanCard.reserved));
 
@@ -363,7 +363,7 @@ bool AnkiSrsStore::recordRating(const CardSrsRecord& updated, bool wasNewCard) {
   entry.op = static_cast<uint8_t>(WalOp::CardRated);
   entry.wasNewCard = wasNewCard ? 1 : 0;
   entry.sessionDay = static_cast<uint16_t>(std::min<uint32_t>(head.currentSessionDay, 65535u));
-  entry.crc32 = crc32Anki(&entry, offsetof(WalEntry, crc32));
+  entry.crc32 = crc32Flashcards(&entry, offsetof(WalEntry, crc32));
 
   if (!appendWalEntry(entry)) {
     return false;
@@ -386,11 +386,11 @@ bool AnkiSrsStore::recordRating(const CardSrsRecord& updated, bool wasNewCard) {
   return true;
 }
 
-bool AnkiSrsStore::markSessionComplete() {
+bool FlashcardSrsStore::markSessionComplete() {
   WalEntry entry{};
   entry.op = static_cast<uint8_t>(WalOp::SessionComplete);
   entry.sessionDay = static_cast<uint16_t>(std::min<uint32_t>(head.currentSessionDay, 65535u));
-  entry.crc32 = crc32Anki(&entry, offsetof(WalEntry, crc32));
+  entry.crc32 = crc32Flashcards(&entry, offsetof(WalEntry, crc32));
 
   if (!appendWalEntry(entry)) {
     return false;
@@ -400,7 +400,7 @@ bool AnkiSrsStore::markSessionComplete() {
   return compact();
 }
 
-bool AnkiSrsStore::advanceSession(uint32_t nextSessionDay) {
+bool FlashcardSrsStore::advanceSession(uint32_t nextSessionDay) {
   const uint32_t targetDay = std::max<uint32_t>(1u, nextSessionDay);
 
   WalEntry entry{};
@@ -408,7 +408,7 @@ bool AnkiSrsStore::advanceSession(uint32_t nextSessionDay) {
   entry.sessionDay = static_cast<uint16_t>(std::min<uint32_t>(targetDay, 65535u));
   entry.card.dueDay = entry.sessionDay;
   entry.card.cardIdHash = targetDay;
-  entry.crc32 = crc32Anki(&entry, offsetof(WalEntry, crc32));
+  entry.crc32 = crc32Flashcards(&entry, offsetof(WalEntry, crc32));
 
   if (!appendWalEntry(entry)) {
     return false;
@@ -425,14 +425,14 @@ bool AnkiSrsStore::advanceSession(uint32_t nextSessionDay) {
   return true;
 }
 
-bool AnkiSrsStore::setNewPerDayOverride(uint16_t limit) {
+bool FlashcardSrsStore::setNewPerDayOverride(uint16_t limit) {
   head.newPerDayOverride = std::min<uint16_t>(limit, MAX_NEW_PER_DAY);
   return compact();
 }
 
-bool AnkiSrsStore::compact() {
+bool FlashcardSrsStore::compact() {
   if (srsPath.empty()) {
-    LOG_ERR("ANKI", "Cannot compact SRS store: path not initialized");
+    LOG_ERR("FCARD", "Cannot compact SRS store: path not initialized");
     return false;
   }
   if (!ensureFileParentDir(srsPath)) {
@@ -450,8 +450,8 @@ bool AnkiSrsStore::compact() {
   }
 
   HalFile tmpFile;
-  if (!Storage.openFileForWrite("ANKI", tmpPath, tmpFile)) {
-    LOG_ERR("ANKI", "Failed to open %s for SRS compaction", tmpPath.c_str());
+  if (!Storage.openFileForWrite("FCARD", tmpPath, tmpFile)) {
+    LOG_ERR("FCARD", "Failed to open %s for SRS compaction", tmpPath.c_str());
     return false;
   }
 
@@ -464,14 +464,14 @@ bool AnkiSrsStore::compact() {
   };
 
   if (!serialization::tryWritePod(tmpFile, head)) {
-    LOG_ERR("ANKI", "Failed writing SRS header to %s", tmpPath.c_str());
+    LOG_ERR("FCARD", "Failed writing SRS header to %s", tmpPath.c_str());
     return abortTmp();
   }
 
   if (!sortedRecords.empty()) {
     const size_t recordBytes = sortedRecords.size() * sizeof(CardSrsRecord);
     if (tmpFile.write(reinterpret_cast<const uint8_t*>(sortedRecords.data()), recordBytes) != recordBytes) {
-      LOG_ERR("ANKI", "Failed writing %u bytes of SRS records to %s", static_cast<unsigned>(recordBytes),
+      LOG_ERR("FCARD", "Failed writing %u bytes of SRS records to %s", static_cast<unsigned>(recordBytes),
               tmpPath.c_str());
       return abortTmp();
     }
@@ -479,25 +479,25 @@ bool AnkiSrsStore::compact() {
 
   tmpFile.flush();
   if (!tmpFile.close()) {
-    LOG_ERR("ANKI", "Failed closing %s during SRS compaction", tmpPath.c_str());
+    LOG_ERR("FCARD", "Failed closing %s during SRS compaction", tmpPath.c_str());
     Storage.remove(tmpPath.c_str());
     return false;
   }
 
   if (Storage.exists(srsPath.c_str()) && !Storage.remove(srsPath.c_str())) {
-    LOG_ERR("ANKI", "Failed removing existing SRS file %s before rename", srsPath.c_str());
+    LOG_ERR("FCARD", "Failed removing existing SRS file %s before rename", srsPath.c_str());
     Storage.remove(tmpPath.c_str());
     return false;
   }
 
   if (!Storage.rename(tmpPath.c_str(), srsPath.c_str())) {
-    LOG_ERR("ANKI", "Failed renaming %s to %s", tmpPath.c_str(), srsPath.c_str());
+    LOG_ERR("FCARD", "Failed renaming %s to %s", tmpPath.c_str(), srsPath.c_str());
     Storage.remove(tmpPath.c_str());
     return false;
   }
 
   if (!walPath.empty() && Storage.exists(walPath.c_str()) && !Storage.remove(walPath.c_str())) {
-    LOG_ERR("ANKI", "Failed removing compacted WAL %s", walPath.c_str());
+    LOG_ERR("FCARD", "Failed removing compacted WAL %s", walPath.c_str());
     return false;
   }
 
@@ -505,4 +505,4 @@ bool AnkiSrsStore::compact() {
   return true;
 }
 
-}  // namespace anki
+}  // namespace flashcards

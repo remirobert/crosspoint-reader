@@ -1,4 +1,4 @@
-#include "AnkiSession.h"
+#include "FlashcardSession.h"
 
 #include <Logging.h>
 #include <Memory.h>
@@ -8,11 +8,11 @@
 #include <limits>
 #include <string>
 
-namespace anki {
+namespace flashcards {
 
 namespace {
 
-constexpr const char* DEFAULT_ANKI_CACHE_DIR = "/.crosspoint/anki";
+constexpr const char* DEFAULT_FLASHCARDS_CACHE_DIR = "/.crosspoint/flashcards";
 constexpr size_t INDEX_SCAN_BATCH_RECORDS = 128;  // 128 * 16 B = 2048 B temporary heap chunk
 constexpr size_t AGAIN_REQUEUE_AHEAD = 6;
 
@@ -34,7 +34,7 @@ bool containsCardHash(const std::vector<SessionSlot>& slots, uint64_t hash) noex
   return false;
 }
 
-bool scanDeckForDay(AnkiDeckIndex& idx, const AnkiSrsStore& store, uint32_t targetDay, DeckScanStats& out) {
+bool scanDeckForDay(FlashcardDeckIndex& idx, const FlashcardSrsStore& store, uint32_t targetDay, DeckScanStats& out) {
   out = DeckScanStats{};
   const uint32_t cardCount = idx.header().cardCount;
   if (cardCount == 0) {
@@ -44,7 +44,7 @@ bool scanDeckForDay(AnkiDeckIndex& idx, const AnkiSrsStore& store, uint32_t targ
   const size_t batchCap = std::min<size_t>(INDEX_SCAN_BATCH_RECORDS, cardCount);
   auto batch = makeUniqueNoThrow<CardIndexRecord[]>(batchCap);
   if (!batch) {
-    LOG_ERR("ANKI", "OOM allocating %u-byte index scan chunk",
+    LOG_ERR("FCARD", "OOM allocating %u-byte index scan chunk",
             static_cast<unsigned>(batchCap * sizeof(CardIndexRecord)));
     return false;
   }
@@ -81,8 +81,8 @@ bool scanDeckForDay(AnkiDeckIndex& idx, const AnkiSrsStore& store, uint32_t targ
 }
 
 struct InspectWorkspace {
-  AnkiDeckIndex idx;
-  AnkiSrsStore store;
+  FlashcardDeckIndex idx;
+  FlashcardSrsStore store;
   std::string idxPath;
   std::string srsPath;
   std::string walPath;
@@ -90,27 +90,27 @@ struct InspectWorkspace {
 
 }  // namespace
 
-AnkiSession::~AnkiSession() { close(); }
+FlashcardSession::~FlashcardSession() { close(); }
 
-bool AnkiSession::inspectDeck(const char* jsonlPath, const char* cacheDir, DeckSummary& out) {
+bool FlashcardSession::inspectDeck(const char* jsonlPath, const char* cacheDir, DeckSummary& out) {
   out = DeckSummary{};
   if (!jsonlPath || jsonlPath[0] == '\0') {
-    LOG_ERR("ANKI", "Cannot inspect deck: empty path");
+    LOG_ERR("FCARD", "Cannot inspect deck: empty path");
     return false;
   }
 
-  const char* effectiveCache = (cacheDir && cacheDir[0] != '\0') ? cacheDir : DEFAULT_ANKI_CACHE_DIR;
-  if (!AnkiDeckIndex::ensureDir(effectiveCache)) {
+  const char* effectiveCache = (cacheDir && cacheDir[0] != '\0') ? cacheDir : DEFAULT_FLASHCARDS_CACHE_DIR;
+  if (!FlashcardDeckIndex::ensureDir(effectiveCache)) {
     return false;
   }
 
   auto ws = makeUniqueNoThrow<InspectWorkspace>();
   if (!ws) {
-    LOG_ERR("ANKI", "OOM allocating %u-byte inspect workspace", static_cast<unsigned>(sizeof(InspectWorkspace)));
+    LOG_ERR("FCARD", "OOM allocating %u-byte inspect workspace", static_cast<unsigned>(sizeof(InspectWorkspace)));
     return false;
   }
 
-  AnkiSrsStore::buildPaths(effectiveCache, jsonlPath, ws->idxPath, ws->srsPath, ws->walPath);
+  FlashcardSrsStore::buildPaths(effectiveCache, jsonlPath, ws->idxPath, ws->srsPath, ws->walPath);
   if (!ws->idx.openOrBuild(jsonlPath, ws->idxPath.c_str())) {
     return false;
   }
@@ -163,7 +163,7 @@ bool AnkiSession::inspectDeck(const char* jsonlPath, const char* cacheDir, DeckS
   return true;
 }
 
-bool AnkiSession::rebuildQueue(uint32_t* outUnseenNew, uint16_t* outMinFutureDue, bool* outHasFutureDue) {
+bool FlashcardSession::rebuildQueue(uint32_t* outUnseenNew, uint16_t* outMinFutureDue, bool* outHasFutureDue) {
   queue.clear();
   if (outUnseenNew) *outUnseenNew = 0;
   if (outMinFutureDue) *outMinFutureDue = 0;
@@ -185,7 +185,7 @@ bool AnkiSession::rebuildQueue(uint32_t* outUnseenNew, uint16_t* outMinFutureDue
     const size_t queueBytes = reserveCap * sizeof(SessionSlot);
     auto probe = makeUniqueNoThrow<uint8_t[]>(queueBytes);
     if (!probe) {
-      LOG_ERR("ANKI", "OOM reserving %u session queue slots (%u B)", static_cast<unsigned>(reserveCap),
+      LOG_ERR("FCARD", "OOM reserving %u session queue slots (%u B)", static_cast<unsigned>(reserveCap),
               static_cast<unsigned>(queueBytes));
       return false;
     }
@@ -196,7 +196,7 @@ bool AnkiSession::rebuildQueue(uint32_t* outUnseenNew, uint16_t* outMinFutureDue
   const size_t batchCap = std::min<size_t>(INDEX_SCAN_BATCH_RECORDS, idxHead.cardCount);
   auto batch = makeUniqueNoThrow<CardIndexRecord[]>(batchCap);
   if (!batch) {
-    LOG_ERR("ANKI", "OOM allocating %u-byte queue build chunk",
+    LOG_ERR("FCARD", "OOM allocating %u-byte queue build chunk",
             static_cast<unsigned>(batchCap * sizeof(CardIndexRecord)));
     return false;
   }
@@ -238,8 +238,7 @@ bool AnkiSession::rebuildQueue(uint32_t* outUnseenNew, uint16_t* outMinFutureDue
     const size_t newLimit = std::min<size_t>(remNew, MAX_ACTIVE_QUEUE - queue.size());
     size_t addedNew = 0;
 
-    for (uint32_t base = 0; base < idxHead.cardCount && addedNew < newLimit;
-         base += static_cast<uint32_t>(batchCap)) {
+    for (uint32_t base = 0; base < idxHead.cardCount && addedNew < newLimit; base += static_cast<uint32_t>(batchCap)) {
       const size_t count = std::min<size_t>(batchCap, idxHead.cardCount - base);
       if (!deckIndex.readIndexRecords(base, batch.get(), count)) {
         return false;
@@ -267,22 +266,22 @@ bool AnkiSession::rebuildQueue(uint32_t* outUnseenNew, uint16_t* outMinFutureDue
   return true;
 }
 
-bool AnkiSession::open(const char* jsonlPath, const char* cacheDir) {
+bool FlashcardSession::open(const char* jsonlPath, const char* cacheDir) {
   close();
   if (!jsonlPath || jsonlPath[0] == '\0') {
-    LOG_ERR("ANKI", "Cannot open session: empty deck path");
+    LOG_ERR("FCARD", "Cannot open session: empty deck path");
     return false;
   }
 
-  const char* effectiveCache = (cacheDir && cacheDir[0] != '\0') ? cacheDir : DEFAULT_ANKI_CACHE_DIR;
-  if (!AnkiDeckIndex::ensureDir(effectiveCache)) {
+  const char* effectiveCache = (cacheDir && cacheDir[0] != '\0') ? cacheDir : DEFAULT_FLASHCARDS_CACHE_DIR;
+  if (!FlashcardDeckIndex::ensureDir(effectiveCache)) {
     return false;
   }
 
   std::string idxPath;
   std::string srsPath;
   std::string walPath;
-  AnkiSrsStore::buildPaths(effectiveCache, jsonlPath, idxPath, srsPath, walPath);
+  FlashcardSrsStore::buildPaths(effectiveCache, jsonlPath, idxPath, srsPath, walPath);
 
   if (!deckIndex.openOrBuild(jsonlPath, idxPath.c_str())) {
     return false;
@@ -294,7 +293,7 @@ bool AnkiSession::open(const char* jsonlPath, const char* cacheDir) {
 
   lineBuf = makeUniqueNoThrow<char[]>(MAX_JSONL_LINE_BYTES);
   if (!lineBuf) {
-    LOG_ERR("ANKI", "OOM allocating %u-byte session line buffer", static_cast<unsigned>(MAX_JSONL_LINE_BYTES));
+    LOG_ERR("FCARD", "OOM allocating %u-byte session line buffer", static_cast<unsigned>(MAX_JSONL_LINE_BYTES));
     deckIndex.close();
     srs.clear();
     return false;
@@ -327,10 +326,10 @@ bool AnkiSession::open(const char* jsonlPath, const char* cacheDir) {
   return true;
 }
 
-void AnkiSession::close() {
+void FlashcardSession::close() {
   if (opened && srs.hasUncompactedWal()) {
     if (!srs.compact()) {
-      LOG_ERR("ANKI", "Failed compacting SRS WAL during session close");
+      LOG_ERR("FCARD", "Failed compacting SRS WAL during session close");
     }
   }
   deckIndex.close();
@@ -341,9 +340,9 @@ void AnkiSession::close() {
   opened = false;
 }
 
-bool AnkiSession::setNewPerDayOverride(uint16_t limit) {
+bool FlashcardSession::setNewPerDayOverride(uint16_t limit) {
   if (!opened) {
-    LOG_ERR("ANKI", "Cannot set newPerDay override: session not open");
+    LOG_ERR("FCARD", "Cannot set newPerDay override: session not open");
     return false;
   }
   if (!srs.setNewPerDayOverride(limit)) {
@@ -355,7 +354,7 @@ bool AnkiSession::setNewPerDayOverride(uint16_t limit) {
   return true;
 }
 
-uint32_t AnkiSession::computeNextSessionDay() const {
+uint32_t FlashcardSession::computeNextSessionDay() const {
   const uint32_t curDay = srs.header().currentSessionDay;
   const uint32_t nextSequential =
       (curDay < std::numeric_limits<uint32_t>::max()) ? (curDay + 1u) : std::numeric_limits<uint32_t>::max();
@@ -380,7 +379,7 @@ uint32_t AnkiSession::computeNextSessionDay() const {
   return nextSequential;
 }
 
-void AnkiSession::previewNextSession(uint16_t& outDue, uint16_t& outNew) const {
+void FlashcardSession::previewNextSession(uint16_t& outDue, uint16_t& outNew) const {
   outDue = 0;
   outNew = 0;
   if (!opened || deckIndex.header().cardCount == 0) {
@@ -396,14 +395,13 @@ void AnkiSession::previewNextSession(uint16_t& outDue, uint16_t& outNew) const {
   const size_t maxRev = std::min<size_t>(deckIndex.header().maxReviews, MAX_ACTIVE_QUEUE);
   const size_t dueSlots = std::min<size_t>(stats.dueAtOrBeforeTarget, maxRev);
   const size_t effNew = srs.effectiveNewPerDay(deckIndex.header().newPerDay);
-  const size_t newSlots =
-      std::min<size_t>(std::min<size_t>(stats.unseenNewTotal, effNew), MAX_ACTIVE_QUEUE - dueSlots);
+  const size_t newSlots = std::min<size_t>(std::min<size_t>(stats.unseenNewTotal, effNew), MAX_ACTIVE_QUEUE - dueSlots);
 
   outDue = static_cast<uint16_t>(dueSlots);
   outNew = static_cast<uint16_t>(newSlots);
 }
 
-bool AnkiSession::currentCard(AnkiCard& outCard, CardSrsRecord& outSrs, IntervalPreview& outPreview) {
+bool FlashcardSession::currentCard(FlashcardItem& outCard, CardSrsRecord& outSrs, IntervalPreview& outPreview) {
   if (!opened || queue.empty() || !lineBuf) {
     return false;
   }
@@ -415,20 +413,20 @@ bool AnkiSession::currentCard(AnkiCard& outCard, CardSrsRecord& outSrs, Interval
 
   outSrs = front.srs;
   const uint16_t today = static_cast<uint16_t>(std::min<uint32_t>(srs.header().currentSessionDay, 65535u));
-  outPreview = AnkiScheduler::previewIntervals(front.srs, today);
+  outPreview = FlashcardScheduler::previewIntervals(front.srs, today);
   return true;
 }
 
-bool AnkiSession::submitRating(Rating rating) {
+bool FlashcardSession::submitRating(Rating rating) {
   if (!opened || queue.empty() || srs.header().sessionCompleted != 0) {
-    LOG_ERR("ANKI", "Cannot submit rating: no active session card");
+    LOG_ERR("FCARD", "Cannot submit rating: no active session card");
     return false;
   }
 
   const SessionSlot current = queue.front();
   const bool wasNewCard = (current.srs.state == static_cast<uint8_t>(CardState::New));
   const uint16_t today = static_cast<uint16_t>(std::min<uint32_t>(srs.header().currentSessionDay, 65535u));
-  const CardSrsRecord updated = AnkiScheduler::reviewCard(current.srs, rating, today);
+  const CardSrsRecord updated = FlashcardScheduler::reviewCard(current.srs, rating, today);
 
   if (!srs.recordRating(updated, wasNewCard)) {
     return false;
@@ -450,9 +448,9 @@ bool AnkiSession::submitRating(Rating rating) {
   return true;
 }
 
-bool AnkiSession::startNextSession() {
+bool FlashcardSession::startNextSession() {
   if (!opened) {
-    LOG_ERR("ANKI", "Cannot start next session: session not open");
+    LOG_ERR("FCARD", "Cannot start next session: session not open");
     return false;
   }
 
@@ -464,4 +462,4 @@ bool AnkiSession::startNextSession() {
   return rebuildQueue();
 }
 
-}  // namespace anki
+}  // namespace flashcards

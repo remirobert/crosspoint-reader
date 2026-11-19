@@ -6,9 +6,9 @@
 #include <string_view>
 #include <type_traits>
 
-namespace anki {
+namespace flashcards {
 
-inline constexpr uint32_t DECK_INDEX_MAGIC = 0x314B4E41u;
+inline constexpr uint32_t DECK_INDEX_MAGIC = 0x31444346u;
 inline constexpr uint8_t DECK_INDEX_VERSION = 1;
 inline constexpr uint32_t SRS_FILE_MAGIC = 0x31535253u;
 inline constexpr uint8_t SRS_FILE_VERSION = 1;
@@ -102,7 +102,7 @@ static_assert(offsetof(WalEntry, crc32) == 28);
 static_assert(sizeof(WalEntry) == 32);
 static_assert(std::is_trivially_copyable_v<WalEntry>);
 
-struct AnkiCard {
+struct FlashcardItem {
   std::string front;
   std::string back;
   std::string hint;
@@ -125,7 +125,7 @@ constexpr uint64_t fnv1a64(std::string_view data) noexcept {
   return hash;
 }
 
-inline uint32_t crc32Anki(const void* data, size_t len) noexcept {
+inline uint32_t crc32Flashcards(const void* data, size_t len) noexcept {
   if (data == nullptr || len == 0) {
     return 0u;
   }
@@ -149,4 +149,4 @@ inline void formatDeckHashHex(std::string_view deckPath, char outHex[17]) noexce
   outHex[16] = '\0';
 }
 
-}  // namespace anki
+}  // namespace flashcards

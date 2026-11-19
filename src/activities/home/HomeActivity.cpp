@@ -27,7 +27,7 @@
 #include "fontIds.h"
 
 int HomeActivity::getMenuItemCount() const {
-  int count = 4;  // File Browser, Library, File transfer, Settings
+  int count = 5;  // File Browser, Library, Flashcards, File transfer, Settings
   if (!recentBooks.empty()) {
     count += recentBooks.size();
   }
@@ -318,6 +318,9 @@ void HomeActivity::loop() {
       case HomeMenuItem::LIBRARY:
         onLibraryOpen();
         break;
+      case HomeMenuItem::FLASHCARDS:
+        onFlashcardsOpen();
+        break;
       case HomeMenuItem::OPDS_BROWSER:  // the library slot
         hasPlugins ? onPluginsOpen() : onOpdsBrowserOpen();
         break;
@@ -438,8 +441,8 @@ void HomeActivity::loop() {
       menuCount - (metrics.homeContinueReadingInMenu ? 0 : static_cast<int>(recentBooks.size()));
   int menuRow = -1;
   // Row height from the theme, not the metrics table: RoundedRaff draws
-  // font-derived rows and the touch grid must match the visuals exactly.
-  const int menuRowHeight = GUI.getMenuRowHeight(renderer);
+  // font-derived rows and Classic / Lyra 3 Covers clamp >5 rows above hints.
+  const int menuRowHeight = GUI.getHomeMenuRowHeight(renderer, menuTop, renderedMenuCount);
   const auto menuTouch = mappedInput.rowTouch(menuRow, menuTop, menuRowHeight + metrics.menuSpacing, renderedMenuCount,
                                               0, INT32_MAX, menuRowHeight);
   if (menuTouch != MappedInputManager::RowTouch::None) {
@@ -524,20 +527,29 @@ void HomeActivity::render(RenderLock&&) {
                           std::bind(&HomeActivity::storeCoverBuffer, this));
 
   // Build menu items dynamically
-  std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_LIBRARY), tr(STR_FILE_TRANSFER),
-                                        tr(STR_SETTINGS_TITLE)};
-  std::vector<UIIcon> menuIcons = {Folder, Library, Transfer, Settings};
-
-  if (hasLibrarySlot()) {
-    menuItems.insert(menuItems.begin() + 2, hasPlugins ? tr(STR_PLUGINS) : tr(STR_OPDS_BROWSER));
-    menuIcons.insert(menuIcons.begin() + 2, Plugins);
-  }
+  std::vector<const char*> menuItems;
+  menuItems.reserve(7);
+  std::vector<UIIcon> menuIcons;
+  menuIcons.reserve(7);
 
   if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
-    // Insert Continue Reading at the top if enabled in theme
-    menuItems.insert(menuItems.begin(), tr(STR_CONTINUE_READING));
-    menuIcons.insert(menuIcons.begin(), Book);
+    menuItems.push_back(tr(STR_CONTINUE_READING));
+    menuIcons.push_back(Book);
   }
+  menuItems.push_back(tr(STR_BROWSE_FILES));
+  menuIcons.push_back(Folder);
+  menuItems.push_back(tr(STR_LIBRARY));
+  menuIcons.push_back(Library);
+  menuItems.push_back("Flashcards");
+  menuIcons.push_back(Flashcards);
+  if (hasLibrarySlot()) {
+    menuItems.push_back(hasPlugins ? tr(STR_PLUGINS) : tr(STR_OPDS_BROWSER));
+    menuIcons.push_back(Plugins);
+  }
+  menuItems.push_back(tr(STR_FILE_TRANSFER));
+  menuIcons.push_back(Transfer);
+  menuItems.push_back(tr(STR_SETTINGS_TITLE));
+  menuIcons.push_back(Settings);
 
   GUI.drawButtonMenu(
       renderer,
@@ -570,6 +582,8 @@ void HomeActivity::onRecentBookSelected(const std::string& path) { activityManag
 void HomeActivity::onFileBrowserOpen() { activityManager.goToFileBrowser(); }
 
 void HomeActivity::onLibraryOpen() { activityManager.goToLibrary(); }
+
+void HomeActivity::onFlashcardsOpen() { activityManager.goToFlashcards(); }
 
 void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
 

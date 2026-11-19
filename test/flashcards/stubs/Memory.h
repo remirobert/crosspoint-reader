@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-namespace anki_test_mem {
+namespace flashcards_test_mem {
 inline int failAllocCountdown = -1;
 
 inline bool shouldFailAlloc() {
@@ -20,19 +20,19 @@ inline bool shouldFailAlloc() {
   --failAllocCountdown;
   return false;
 }
-}  // namespace anki_test_mem
+}  // namespace flashcards_test_mem
 
 template <typename T, typename... Args>
   requires(!std::is_array_v<T>)
 std::unique_ptr<T> makeUniqueNoThrow(Args&&... args) {
-  if (anki_test_mem::shouldFailAlloc()) return nullptr;
+  if (flashcards_test_mem::shouldFailAlloc()) return nullptr;
   return std::unique_ptr<T>(new (std::nothrow) T(std::forward<Args>(args)...));
 }
 
 template <typename T>
   requires std::is_unbounded_array_v<T>
 std::unique_ptr<T> makeUniqueNoThrow(size_t count) {
-  if (anki_test_mem::shouldFailAlloc()) return nullptr;
+  if (flashcards_test_mem::shouldFailAlloc()) return nullptr;
   using Elem = std::remove_extent_t<T>;
   return std::unique_ptr<T>(new (std::nothrow) Elem[count]());
 }

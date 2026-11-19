@@ -115,5 +115,5 @@ add_test(NAME clipping_selection_text COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURR
 
 add_test(NAME recursive_dictionary COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_recursive_dictionary.py)
 
-add_subdirectory(anki)
-add_test(NAME Apkg2Jsonl COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_apkg2jsonl.py)
+add_subdirectory(flashcards)
+add_test(NAME Deck2Jsonl COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_deck2jsonl.py)

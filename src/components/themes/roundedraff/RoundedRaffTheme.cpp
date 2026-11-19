@@ -21,6 +21,7 @@ constexpr int kBottomRadius = 15;
 constexpr int kRowRadius = 20;
 constexpr int kInteractiveInsetX = 20;
 constexpr int kSelectableRowGap = 6;
+static_assert(kSelectableRowGap == RoundedRaffMetrics::values.menuSpacing);
 constexpr int kTitleFontId = UI_12_FONT_ID;  // Requested main title size: 12px
 constexpr int kGuideFontId = SMALL_FONT_ID;  // Closest available to requested 6px
 
@@ -141,13 +142,25 @@ int RoundedRaffTheme::getMenuRowHeight(const GfxRenderer& renderer) const {
   return renderer.getLineHeight(kTitleFontId) + 20;  // 10px top + 10px bottom
 }
 
+int RoundedRaffTheme::getHomeMenuRowHeight(const GfxRenderer& renderer, const int menuTop, const int itemCount) const {
+  const int defaultHeight = getMenuRowHeight(renderer);
+  if (itemCount <= 6) {
+    return defaultHeight;
+  }
+  const int bottomLimit =
+      renderer.getScreenHeight() - (gpio.hasTouch() ? 8 : RoundedRaffMetrics::values.buttonHintsHeight + 4);
+  const int availHeight = bottomLimit - menuTop;
+  const int fitted = (availHeight - (itemCount - 1) * kSelectableRowGap) / itemCount;
+  return std::max(renderer.getLineHeight(kTitleFontId) + 4, std::min(defaultHeight, fitted));
+}
+
 void RoundedRaffTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount, int selectedIndex,
                                       const std::function<std::string(int index)>& buttonLabel,
                                       const std::function<UIIcon(int index)>& rowIcon) const {
   (void)rowIcon;
   const int sidePadding = RoundedRaffMetrics::values.contentSidePadding;
   const int rowX = rect.x + sidePadding;
-  const int rowHeight = getMenuRowHeight(renderer);  // shared with HomeActivity's touch grid
+  const int rowHeight = getHomeMenuRowHeight(renderer, rect.y, buttonCount);  // shared with HomeActivity's touch grid
   const int rowGap = kSelectableRowGap;
   const int rowStep = rowHeight + rowGap;
   const int pageItems = std::max(1, rect.height / rowStep);

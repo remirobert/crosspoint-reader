@@ -10,15 +10,15 @@ import tempfile
 import unittest
 import zipfile
 
-SCRIPT_PATH = Path(__file__).resolve().parents[1] / "tools" / "apkg2jsonl.py"
-SPEC = importlib.util.spec_from_file_location("apkg2jsonl", SCRIPT_PATH)
-APKG2JSONL = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(APKG2JSONL)
+SCRIPT_PATH = Path(__file__).resolve().parents[1] / "tools" / "deck2jsonl.py"
+SPEC = importlib.util.spec_from_file_location("deck2jsonl", SCRIPT_PATH)
+DECK2JSONL = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(DECK2JSONL)
 
 SEP = "\x1f"
 
 
-def _create_anki_sqlite(
+def _create_apkg_sqlite(
     db_path: Path,
     *,
     models: dict,
@@ -99,13 +99,13 @@ def _create_anki_sqlite(
         conn.close()
 
 
-class Apkg2JsonlTest(unittest.TestCase):
+class Deck2JsonlTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.addCleanup(self.temp.cleanup)
 
-    def test_apkg_anki21_custom_fields_cjk_html_and_media(self) -> None:
+    def test_apkg_v21_custom_fields_cjk_html_and_media(self) -> None:
         real_db = self.root / "real.sqlite"
         stub_db = self.root / "stub.sqlite"
 
@@ -186,14 +186,14 @@ class Apkg2JsonlTest(unittest.TestCase):
             (1004, 12, 50, 0),
             (1005, 13, 50, 0),
         ]
-        _create_anki_sqlite(real_db, models=models, decks=decks, notes=notes, cards=cards)
+        _create_apkg_sqlite(real_db, models=models, decks=decks, notes=notes, cards=cards)
 
-        # Create a dummy collection.anki2 placeholder alongside collection.anki21 (like Anki 2.1).
-        _create_anki_sqlite(
+        # Create a dummy collection.anki2 placeholder alongside collection.anki21.
+        _create_apkg_sqlite(
             stub_db,
             models={"1": {"id": 1, "name": "Basic", "flds": [{"name": "Front"}, {"name": "Back"}]}},
             decks={"1": {"id": 1, "name": "Default"}},
-            notes=[(1, "stub", 1, ["Please update to the latest Anki version.", "Stub"])],
+            notes=[(1, "stub", 1, ["Legacy stub row.", "Stub"])],
             cards=[(1, 1, 1, 0)],
         )
 
@@ -206,7 +206,7 @@ class Apkg2JsonlTest(unittest.TestCase):
         out_path = self.root / "core2k.jsonl"
         stdout_buf = io.StringIO()
         with contextlib.redirect_stdout(stdout_buf):
-            rc = APKG2JSONL.main(
+            rc = DECK2JSONL.main(
                 [
                     str(apkg_path),
                     str(out_path),
@@ -241,7 +241,7 @@ class Apkg2JsonlTest(unittest.TestCase):
             ],
         )
 
-    def test_apkg_anki2_numeric_indices_and_deck_title_autodetect(self) -> None:
+    def test_apkg_v2_numeric_indices_and_deck_title_autodetect(self) -> None:
         db_path = self.root / "legacy.sqlite"
         models = {
             "10": {
@@ -262,7 +262,7 @@ class Apkg2JsonlTest(unittest.TestCase):
             (501, "fr-01", 10, ["Bonjour&nbsp;!", "Hello!", "Formal &amp; polite greeting"]),
         ]
         cards = [(9001, 501, 99, 0)]
-        _create_anki_sqlite(db_path, models=models, decks=decks, notes=notes, cards=cards)
+        _create_apkg_sqlite(db_path, models=models, decks=decks, notes=notes, cards=cards)
 
         apkg_path = self.root / "french.apkg"
         with zipfile.ZipFile(apkg_path, "w") as zf:
@@ -270,7 +270,7 @@ class Apkg2JsonlTest(unittest.TestCase):
 
         out_path = self.root / "french.jsonl"
         with contextlib.redirect_stdout(io.StringIO()):
-            rc = APKG2JSONL.main(
+            rc = DECK2JSONL.main(
                 [
                     str(apkg_path),
                     "-o",
@@ -303,7 +303,7 @@ class Apkg2JsonlTest(unittest.TestCase):
                 "flds": [{"name": "Front", "ord": 0}, {"name": "Back", "ord": 1}],
             }
         }
-        _create_anki_sqlite(
+        _create_apkg_sqlite(
             db_path,
             models=models,
             decks={"1": {"id": 1, "name": "Default"}},
@@ -316,7 +316,7 @@ class Apkg2JsonlTest(unittest.TestCase):
 
         out_path = self.root / "cats.jsonl"
         with contextlib.redirect_stdout(io.StringIO()):
-            rc = APKG2JSONL.main([str(apkg_path), str(out_path)])
+            rc = DECK2JSONL.main([str(apkg_path), str(out_path)])
 
         self.assertEqual(rc, 0)
         lines = out_path.read_text(encoding="utf-8").splitlines()
@@ -328,20 +328,20 @@ class Apkg2JsonlTest(unittest.TestCase):
             ],
         )
 
-    def test_zstd_anki21b_detected_cleanly_without_traceback(self) -> None:
+    def test_zstd_v21b_detected_cleanly_without_traceback(self) -> None:
         stub_db = self.root / "stub.sqlite"
-        _create_anki_sqlite(
+        _create_apkg_sqlite(
             stub_db,
             models={"1": {"id": 1, "name": "Basic", "flds": [{"name": "Front"}, {"name": "Back"}]}},
             decks={"1": {"id": 1, "name": "Default"}},
-            notes=[(1, "stub", 1, ["Please update Anki", "Stub"])],
+            notes=[(1, "stub", 1, ["Legacy stub", "Stub"])],
             cards=[(1, 1, 1, 0)],
         )
 
         apkg_21b = self.root / "modern_zstd.apkg"
         with zipfile.ZipFile(apkg_21b, "w") as zf:
             zf.write(stub_db, "collection.anki2")
-            zf.writestr("collection.anki21b", APKG2JSONL.ZSTD_MAGIC + b"\x00\x01\x02\x03")
+            zf.writestr("collection.anki21b", DECK2JSONL.ZSTD_MAGIC + b"\x00\x01\x02\x03")
 
         out_path = self.root / "should_not_exist.jsonl"
         proc = subprocess.run(
@@ -358,15 +358,15 @@ class Apkg2JsonlTest(unittest.TestCase):
 
         # Also verify passing a raw zstd-compressed .anki21b file directly.
         raw_21b = self.root / "collection.anki21b"
-        raw_21b.write_bytes(APKG2JSONL.ZSTD_MAGIC + b"compressed-payload")
+        raw_21b.write_bytes(DECK2JSONL.ZSTD_MAGIC + b"compressed-payload")
         err_buf = io.StringIO()
         with contextlib.redirect_stderr(err_buf):
-            rc = APKG2JSONL.main([str(raw_21b), str(out_path)])
+            rc = DECK2JSONL.main([str(raw_21b), str(out_path)])
         self.assertEqual(rc, 1)
         self.assertIn("collection.anki21b", err_buf.getvalue())
         self.assertFalse(out_path.exists())
 
-    def test_tsv_plain_text_and_anki_directives(self) -> None:
+    def test_tsv_plain_text_and_export_directives(self) -> None:
         tsv_path = self.root / "vocab.tsv"
         tsv_path.write_text(
             "食べる [sound:eat.mp3]\tto eat<br>consume\tたべる\t<div>毎日野菜を食べる。</div>\n"
@@ -378,7 +378,7 @@ class Apkg2JsonlTest(unittest.TestCase):
         )
         out_path = self.root / "vocab.jsonl"
         with contextlib.redirect_stdout(io.StringIO()):
-            rc = APKG2JSONL.main(
+            rc = DECK2JSONL.main(
                 [
                     str(tsv_path),
                     str(out_path),
@@ -404,9 +404,9 @@ class Apkg2JsonlTest(unittest.TestCase):
             ],
         )
 
-        # Also test Anki plain-text export headers (#separator:tab, #deck:, #guid column:1).
-        anki_txt = self.root / "anki_export.tsv"
-        anki_txt.write_text(
+        # Also test plain-text export headers (#separator:tab, #deck:, #guid column:1).
+        export_txt = self.root / "deck_export.tsv"
+        export_txt.write_text(
             "#separator:tab\n"
             "#html:true\n"
             "#guid column:1\n"
@@ -415,12 +415,12 @@ class Apkg2JsonlTest(unittest.TestCase):
             "g-002\t川\triver\n",
             encoding="utf-8",
         )
-        anki_out = self.root / "anki_export.jsonl"
+        export_out = self.root / "deck_export.jsonl"
         with contextlib.redirect_stdout(io.StringIO()):
-            rc2 = APKG2JSONL.main([str(anki_txt), str(anki_out)])
+            rc2 = DECK2JSONL.main([str(export_txt), str(export_out)])
         self.assertEqual(rc2, 0)
         self.assertEqual(
-            anki_out.read_text(encoding="utf-8").splitlines(),
+            export_out.read_text(encoding="utf-8").splitlines(),
             [
                 '{"_meta":true,"title":"Kanji N5","newPerDay":20,"maxReviews":200}',
                 '{"id":"g-001","front":"山","back":"mountain"}',
@@ -438,7 +438,7 @@ class Apkg2JsonlTest(unittest.TestCase):
         )
         out_path = self.root / "cards.jsonl"
         with contextlib.redirect_stdout(io.StringIO()):
-            rc = APKG2JSONL.main(
+            rc = DECK2JSONL.main(
                 [
                     str(csv_path),
                     str(out_path),
@@ -475,7 +475,7 @@ class Apkg2JsonlTest(unittest.TestCase):
 
     def test_unknown_field_name_reports_available_fields(self) -> None:
         db_path = self.root / "err.sqlite"
-        _create_anki_sqlite(
+        _create_apkg_sqlite(
             db_path,
             models={
                 "1": {
@@ -494,7 +494,7 @@ class Apkg2JsonlTest(unittest.TestCase):
 
         err_buf = io.StringIO()
         with contextlib.redirect_stderr(err_buf):
-            rc = APKG2JSONL.main([str(apkg_path), "--front-field", "WrongName"])
+            rc = DECK2JSONL.main([str(apkg_path), "--front-field", "WrongName"])
         self.assertEqual(rc, 1)
         self.assertIn("WrongName", err_buf.getvalue())
         self.assertIn("Word, Def", err_buf.getvalue())

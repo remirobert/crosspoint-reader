@@ -5,12 +5,12 @@
 #include <memory>
 #include <vector>
 
-#include "AnkiDeckIndex.h"
-#include "AnkiScheduler.h"
-#include "AnkiSrsStore.h"
-#include "AnkiTypes.h"
+#include "FlashcardDeckIndex.h"
+#include "FlashcardScheduler.h"
+#include "FlashcardSrsStore.h"
+#include "FlashcardTypes.h"
 
-namespace anki {
+namespace flashcards {
 
 struct SessionSlot {
   uint32_t cardOrdinal = 0;
@@ -27,22 +27,22 @@ struct DeckSummary {
   char title[64]{};
 };
 
-class AnkiSession {
+class FlashcardSession {
  public:
-  using DeckSummary = ::anki::DeckSummary;
-  using SessionSlot = ::anki::SessionSlot;
+  using DeckSummary = ::flashcards::DeckSummary;
+  using SessionSlot = ::flashcards::SessionSlot;
 
-  AnkiSession() = default;
-  ~AnkiSession();
-  AnkiSession(const AnkiSession&) = delete;
-  AnkiSession& operator=(const AnkiSession&) = delete;
+  FlashcardSession() = default;
+  ~FlashcardSession();
+  FlashcardSession(const FlashcardSession&) = delete;
+  FlashcardSession& operator=(const FlashcardSession&) = delete;
 
   static bool inspectDeck(const char* jsonlPath, const char* cacheDir, DeckSummary& out);
   static bool inspectDeck(const char* jsonlPath, DeckSummary& out) {
-    return inspectDeck(jsonlPath, "/.crosspoint/anki", out);
+    return inspectDeck(jsonlPath, "/.crosspoint/flashcards", out);
   }
 
-  bool open(const char* jsonlPath, const char* cacheDir = "/.crosspoint/anki");
+  bool open(const char* jsonlPath, const char* cacheDir = "/.crosspoint/flashcards");
   void close();
 
   bool isOpen() const { return opened; }
@@ -60,22 +60,22 @@ class AnkiSession {
   uint32_t computeNextSessionDay() const;
   void previewNextSession(uint16_t& outDue, uint16_t& outNew) const;
 
-  bool currentCard(AnkiCard& outCard, CardSrsRecord& outSrs, IntervalPreview& outPreview);
+  bool currentCard(FlashcardItem& outCard, CardSrsRecord& outSrs, IntervalPreview& outPreview);
   bool submitRating(Rating rating);
   bool startNextSession();
 
-  const AnkiSrsStore& srsStore() const { return srs; }
-  const AnkiDeckIndex& index() const { return deckIndex; }
+  const FlashcardSrsStore& srsStore() const { return srs; }
+  const FlashcardDeckIndex& index() const { return deckIndex; }
 
  private:
   bool rebuildQueue(uint32_t* outUnseenNew = nullptr, uint16_t* outMinFutureDue = nullptr,
                     bool* outHasFutureDue = nullptr);
 
-  mutable AnkiDeckIndex deckIndex;
-  AnkiSrsStore srs;
+  mutable FlashcardDeckIndex deckIndex;
+  FlashcardSrsStore srs;
   std::vector<SessionSlot> queue;
   std::unique_ptr<char[]> lineBuf;
   bool opened = false;
 };
 
-}  // namespace anki
+}  // namespace flashcards

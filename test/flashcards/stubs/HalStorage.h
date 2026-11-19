@@ -24,7 +24,7 @@ inline constexpr oflag_t O_CREAT = 0x10;
 inline constexpr oflag_t O_TRUNC = 0x20;
 inline constexpr oflag_t O_EXCL = 0x40;
 
-namespace anki_fs {
+namespace flashcards_fs {
 
 struct Node {
   bool directory = false;
@@ -141,7 +141,7 @@ inline unsigned openCount(std::string_view path) {
   return it == opensByPath.end() ? 0u : it->second;
 }
 
-}  // namespace anki_fs
+}  // namespace flashcards_fs
 
 class HalStorage;
 
@@ -226,7 +226,7 @@ class HalFile {
   size_t write(const uint8_t* buf, size_t count) {
     if (!node || !canWrite || node->directory) return 0;
     if (count == 0) return 0;
-    anki_fs::writesByPath[path]++;
+    flashcards_fs::writesByPath[path]++;
     if (appendMode) {
       filePos = node->bytes.size();
     }
@@ -260,15 +260,15 @@ class HalFile {
   HalFile openNextFile() {
     if (!node || !node->directory) return {};
     std::vector<std::string> children;
-    for (const auto& [entryPath, entryNode] : anki_fs::files) {
-      if (entryPath != path && anki_fs::parentPath(entryPath) == path) {
+    for (const auto& [entryPath, entryNode] : flashcards_fs::files) {
+      if (entryPath != path && flashcards_fs::parentPath(entryPath) == path) {
         children.push_back(entryPath);
       }
     }
     if (filePos >= children.size()) return {};
     HalFile child;
     child.path = children[filePos++];
-    child.node = anki_fs::files[child.path];
+    child.node = flashcards_fs::files[child.path];
     child.canRead = true;
     return child;
   }
@@ -277,7 +277,7 @@ class HalFile {
   operator bool() const { return isOpen(); }
 
  private:
-  std::shared_ptr<anki_fs::Node> node;
+  std::shared_ptr<flashcards_fs::Node> node;
   std::string path;
   size_t filePos = 0;
   bool canRead = false;
@@ -296,27 +296,27 @@ class HalStorage {
 
   bool exists(const char* path) {
     if (!path || path[0] == '\0') return false;
-    anki_fs::ensureRoot();
-    return anki_fs::files.count(anki_fs::normalizePath(path)) != 0;
+    flashcards_fs::ensureRoot();
+    return flashcards_fs::files.count(flashcards_fs::normalizePath(path)) != 0;
   }
 
   bool mkdir(const char* path, const bool pFlag = true) {
     if (!path || path[0] == '\0') return false;
-    anki_fs::ensureRoot();
-    const std::string norm = anki_fs::normalizePath(path);
-    const auto existing = anki_fs::files.find(norm);
-    if (existing != anki_fs::files.end()) {
+    flashcards_fs::ensureRoot();
+    const std::string norm = flashcards_fs::normalizePath(path);
+    const auto existing = flashcards_fs::files.find(norm);
+    if (existing != flashcards_fs::files.end()) {
       return existing->second->directory;
     }
     if (pFlag) {
-      anki_fs::ensureParents(norm);
+      flashcards_fs::ensureParents(norm);
     } else {
-      const auto parent = anki_fs::files.find(anki_fs::parentPath(norm));
-      if (parent == anki_fs::files.end() || !parent->second->directory) return false;
+      const auto parent = flashcards_fs::files.find(flashcards_fs::parentPath(norm));
+      if (parent == flashcards_fs::files.end() || !parent->second->directory) return false;
     }
-    auto dir = std::make_shared<anki_fs::Node>();
+    auto dir = std::make_shared<flashcards_fs::Node>();
     dir->directory = true;
-    anki_fs::files[norm] = std::move(dir);
+    flashcards_fs::files[norm] = std::move(dir);
     return true;
   }
 
@@ -324,19 +324,19 @@ class HalStorage {
 
   HalFile open(const char* path, const oflag_t oflag = O_RDONLY) {
     if (!path || path[0] == '\0') return {};
-    anki_fs::ensureRoot();
-    const std::string norm = anki_fs::normalizePath(path);
+    flashcards_fs::ensureRoot();
+    const std::string norm = flashcards_fs::normalizePath(path);
     const int accMode = oflag & 0x03;
     const bool canRead = (accMode == O_RDONLY) || ((oflag & O_RDWR) != 0);
     const bool canWrite = ((oflag & O_WRONLY) != 0) || ((oflag & O_RDWR) != 0);
 
-    auto it = anki_fs::files.find(norm);
-    if (it == anki_fs::files.end()) {
+    auto it = flashcards_fs::files.find(norm);
+    if (it == flashcards_fs::files.end()) {
       if (!(oflag & O_CREAT) || !canWrite) return {};
-      const auto parent = anki_fs::files.find(anki_fs::parentPath(norm));
-      if (parent == anki_fs::files.end() || !parent->second->directory) return {};
-      auto created = std::make_shared<anki_fs::Node>();
-      it = anki_fs::files.emplace(norm, std::move(created)).first;
+      const auto parent = flashcards_fs::files.find(flashcards_fs::parentPath(norm));
+      if (parent == flashcards_fs::files.end() || !parent->second->directory) return {};
+      auto created = std::make_shared<flashcards_fs::Node>();
+      it = flashcards_fs::files.emplace(norm, std::move(created)).first;
     } else {
       if ((oflag & O_CREAT) && (oflag & O_EXCL)) return {};
       if (it->second->directory && canWrite) return {};
@@ -346,7 +346,7 @@ class HalStorage {
       it->second->bytes.clear();
     }
 
-    anki_fs::opensByPath[norm]++;
+    flashcards_fs::opensByPath[norm]++;
     HalFile f;
     f.node = it->second;
     f.path = norm;
@@ -377,34 +377,34 @@ class HalStorage {
 
   bool remove(const char* path) {
     if (!path || path[0] == '\0') return false;
-    const std::string norm = anki_fs::normalizePath(path);
-    const auto it = anki_fs::files.find(norm);
-    if (it == anki_fs::files.end() || it->second->directory) return false;
-    anki_fs::files.erase(it);
+    const std::string norm = flashcards_fs::normalizePath(path);
+    const auto it = flashcards_fs::files.find(norm);
+    if (it == flashcards_fs::files.end() || it->second->directory) return false;
+    flashcards_fs::files.erase(it);
     return true;
   }
 
   // Matches SdFat vol().rename(): fails if oldPath is missing or newPath already exists.
   bool rename(const char* oldPath, const char* newPath) {
     if (!oldPath || !newPath) return false;
-    const std::string src = anki_fs::normalizePath(oldPath);
-    const std::string dst = anki_fs::normalizePath(newPath);
-    if (!anki_fs::files.count(src) || anki_fs::files.count(dst)) return false;
-    const auto dstParent = anki_fs::files.find(anki_fs::parentPath(dst));
-    if (dstParent == anki_fs::files.end() || !dstParent->second->directory) return false;
+    const std::string src = flashcards_fs::normalizePath(oldPath);
+    const std::string dst = flashcards_fs::normalizePath(newPath);
+    if (!flashcards_fs::files.count(src) || flashcards_fs::files.count(dst)) return false;
+    const auto dstParent = flashcards_fs::files.find(flashcards_fs::parentPath(dst));
+    if (dstParent == flashcards_fs::files.end() || !dstParent->second->directory) return false;
 
-    std::vector<std::pair<std::string, std::shared_ptr<anki_fs::Node>>> moved;
+    std::vector<std::pair<std::string, std::shared_ptr<flashcards_fs::Node>>> moved;
     const std::string prefix = src + "/";
-    for (auto it = anki_fs::files.begin(); it != anki_fs::files.end();) {
+    for (auto it = flashcards_fs::files.begin(); it != flashcards_fs::files.end();) {
       if (it->first == src || it->first.starts_with(prefix)) {
         moved.emplace_back(dst + it->first.substr(src.size()), it->second);
-        it = anki_fs::files.erase(it);
+        it = flashcards_fs::files.erase(it);
       } else {
         ++it;
       }
     }
     for (auto& [p, node] : moved) {
-      anki_fs::files[p] = std::move(node);
+      flashcards_fs::files[p] = std::move(node);
     }
     return true;
   }
@@ -415,28 +415,28 @@ class HalStorage {
 
   bool rmdir(const char* path) {
     if (!path || path[0] == '\0') return false;
-    const std::string norm = anki_fs::normalizePath(path);
+    const std::string norm = flashcards_fs::normalizePath(path);
     if (norm == "/") return false;
-    const auto it = anki_fs::files.find(norm);
-    if (it == anki_fs::files.end() || !it->second->directory) return false;
+    const auto it = flashcards_fs::files.find(norm);
+    if (it == flashcards_fs::files.end() || !it->second->directory) return false;
     const std::string prefix = norm + "/";
-    for (const auto& [k, _] : anki_fs::files) {
+    for (const auto& [k, _] : flashcards_fs::files) {
       if (k.starts_with(prefix)) return false;
     }
-    anki_fs::files.erase(it);
+    flashcards_fs::files.erase(it);
     return true;
   }
 
   bool removeDir(const char* path) {
     if (!path || path[0] == '\0') return false;
-    const std::string norm = anki_fs::normalizePath(path);
+    const std::string norm = flashcards_fs::normalizePath(path);
     if (norm == "/") return false;
-    const auto it = anki_fs::files.find(norm);
-    if (it == anki_fs::files.end() || !it->second->directory) return false;
+    const auto it = flashcards_fs::files.find(norm);
+    if (it == flashcards_fs::files.end() || !it->second->directory) return false;
     const std::string prefix = norm + "/";
-    for (auto cur = anki_fs::files.begin(); cur != anki_fs::files.end();) {
+    for (auto cur = flashcards_fs::files.begin(); cur != flashcards_fs::files.end();) {
       if (cur->first == norm || cur->first.starts_with(prefix)) {
-        cur = anki_fs::files.erase(cur);
+        cur = flashcards_fs::files.erase(cur);
       } else {
         ++cur;
       }

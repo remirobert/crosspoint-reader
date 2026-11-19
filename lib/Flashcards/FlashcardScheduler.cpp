@@ -1,13 +1,13 @@
-#include "AnkiScheduler.h"
+#include "FlashcardScheduler.h"
 
 #include <algorithm>
 #include <cmath>
 
-namespace anki {
+namespace flashcards {
 
 namespace {
 
-// Default FSRS-5 weights (Section 4.2 of docs/anki-architecture.md).
+// Default FSRS-5 weights (Section 4.2 of docs/flashcards-architecture.md).
 constexpr float W[19] = {
     0.40255f, 1.18385f, 3.17300f, 15.69105f, 7.19490f, 0.53450f, 1.46040f, 0.00460f, 1.54575f, 0.11920f,
     1.01925f, 1.93950f, 0.11000f, 0.29605f,  2.26980f, 0.23150f, 2.98980f, 0.51655f, 0.66210f,
@@ -33,9 +33,7 @@ CardState sanitizeState(uint8_t rawState) noexcept {
   return static_cast<CardState>(rawState);
 }
 
-int sanitizeGrade(Rating rating) noexcept {
-  return std::clamp(static_cast<int>(rating), 1, 4);
-}
+int sanitizeGrade(Rating rating) noexcept { return std::clamp(static_cast<int>(rating), 1, 4); }
 
 float clampStability(float s) noexcept {
   if (!std::isfinite(s) || s < MIN_STABILITY) {
@@ -144,7 +142,7 @@ FsrsOutcome computeFsrs(const CardSrsRecord& current, Rating rating, uint16_t se
 
 }  // namespace
 
-IntervalPreview AnkiScheduler::previewIntervals(const CardSrsRecord& current, uint16_t sessionDay) noexcept {
+IntervalPreview FlashcardScheduler::previewIntervals(const CardSrsRecord& current, uint16_t sessionDay) noexcept {
   const uint32_t rawHard = stabilityToDays(computeFsrs(current, Rating::Hard, sessionDay).stability);
   const uint32_t rawGood = stabilityToDays(computeFsrs(current, Rating::Good, sessionDay).stability);
   const uint32_t rawEasy = stabilityToDays(computeFsrs(current, Rating::Easy, sessionDay).stability);
@@ -167,7 +165,8 @@ IntervalPreview AnkiScheduler::previewIntervals(const CardSrsRecord& current, ui
   };
 }
 
-CardSrsRecord AnkiScheduler::reviewCard(const CardSrsRecord& current, Rating rating, uint16_t sessionDay) noexcept {
+CardSrsRecord FlashcardScheduler::reviewCard(const CardSrsRecord& current, Rating rating,
+                                             uint16_t sessionDay) noexcept {
   const CardState prevState = sanitizeState(current.state);
   const int g = sanitizeGrade(rating);
   const FsrsOutcome outcome = computeFsrs(current, static_cast<Rating>(g), sessionDay);
@@ -205,4 +204,4 @@ CardSrsRecord AnkiScheduler::reviewCard(const CardSrsRecord& current, Rating rat
   return next;
 }
 
-}  // namespace anki
+}  // namespace flashcards

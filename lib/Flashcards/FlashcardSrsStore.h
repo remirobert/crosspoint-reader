@@ -6,15 +6,15 @@
 #include <string_view>
 #include <vector>
 
-#include "AnkiTypes.h"
+#include "FlashcardTypes.h"
 
-namespace anki {
+namespace flashcards {
 
 inline constexpr uint32_t MAX_SRS_RECORDS = 4096;
 
-class AnkiSrsStore {
+class FlashcardSrsStore {
  public:
-  AnkiSrsStore() = default;
+  FlashcardSrsStore() = default;
 
   static void buildPaths(const char* cacheDir, std::string_view deckPath, std::string& idxPath, std::string& srsPath,
                          std::string& walPath);
@@ -54,4 +54,4 @@ class AnkiSrsStore {
   size_t walSizeBytes = 0;
 };
 
-}  // namespace anki
+}  // namespace flashcards

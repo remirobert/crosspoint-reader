@@ -1,4 +1,4 @@
-#include "AnkiDeckIndex.h"
+#include "FlashcardDeckIndex.h"
 
 #include <ArduinoJson.h>
 #include <Logging.h>
@@ -13,15 +13,13 @@
 #include <string>
 #include <string_view>
 
-namespace anki {
+namespace flashcards {
 
 namespace {
 
 constexpr size_t STREAM_READ_CHUNK_BYTES = 2048;
 
-bool isAsciiSpace(char c) noexcept {
-  return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\v' || c == '\f';
-}
+bool isAsciiSpace(char c) noexcept { return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\v' || c == '\f'; }
 
 bool hasNonWhitespace(std::string_view text) noexcept {
   for (char c : text) {
@@ -64,7 +62,7 @@ bool ensureParentDir(const char* filePath) {
   const size_t slash = view.find_last_of('/');
   if (slash == std::string_view::npos || slash == 0) return true;
   std::string parent(view.substr(0, slash));
-  return AnkiDeckIndex::ensureDir(parent.c_str());
+  return FlashcardDeckIndex::ensureDir(parent.c_str());
 }
 
 uint64_t computeCardIdHash(JsonObjectConst obj, const char* rawFront) noexcept {
@@ -290,7 +288,7 @@ bool indexSingleLine(char* line, size_t lineLen, uint32_t lineOffset, IndexBuild
 
   const DeserializationError err = deserializeJson(ws.doc, line, lineLen);
   if (err != DeserializationError::Ok || ws.doc.overflowed() || !ws.doc.is<JsonObjectConst>()) {
-    LOG_ERR("ANKI", "Skipping malformed JSON line at offset %u", static_cast<unsigned>(lineOffset));
+    LOG_ERR("FCARD", "Skipping malformed JSON line at offset %u", static_cast<unsigned>(lineOffset));
     return true;
   }
 
@@ -315,12 +313,12 @@ bool indexSingleLine(char* line, size_t lineLen, uint32_t lineOffset, IndexBuild
   const char* rawFront = obj["front"] | "";
   const char* rawBack = obj["back"] | "";
   if (!hasNonWhitespace(rawFront) || !hasNonWhitespace(rawBack)) {
-    LOG_ERR("ANKI", "Skipping card with missing/empty front or back at offset %u", static_cast<unsigned>(lineOffset));
+    LOG_ERR("FCARD", "Skipping card with missing/empty front or back at offset %u", static_cast<unsigned>(lineOffset));
     return true;
   }
 
   if (ws.newHead.cardCount == std::numeric_limits<uint32_t>::max()) {
-    LOG_ERR("ANKI", "Card count overflow at offset %u", static_cast<unsigned>(lineOffset));
+    LOG_ERR("FCARD", "Card count overflow at offset %u", static_cast<unsigned>(lineOffset));
     return false;
   }
 
@@ -331,7 +329,7 @@ bool indexSingleLine(char* line, size_t lineLen, uint32_t lineOffset, IndexBuild
   rec.flags = 0;
 
   if (!serialization::tryWritePod(ws.tmpFile, rec)) {
-    LOG_ERR("ANKI", "Failed writing index record to %s", ws.tmpPath.c_str());
+    LOG_ERR("FCARD", "Failed writing index record to %s", ws.tmpPath.c_str());
     return false;
   }
 
@@ -341,11 +339,11 @@ bool indexSingleLine(char* line, size_t lineLen, uint32_t lineOffset, IndexBuild
 
 }  // namespace
 
-AnkiDeckIndex::~AnkiDeckIndex() { close(); }
+FlashcardDeckIndex::~FlashcardDeckIndex() { close(); }
 
-bool AnkiDeckIndex::ensureDir(const char* dirPath) {
+bool FlashcardDeckIndex::ensureDir(const char* dirPath) {
   if (!dirPath || dirPath[0] == '\0') {
-    LOG_ERR("ANKI", "Cannot create empty directory path");
+    LOG_ERR("FCARD", "Cannot create empty directory path");
     return false;
   }
 
@@ -370,7 +368,7 @@ bool AnkiDeckIndex::ensureDir(const char* dirPath) {
       }
       current.append(full.data() + pos, segEnd - pos);
       if (!Storage.exists(current.c_str()) && !Storage.mkdir(current.c_str())) {
-        LOG_ERR("ANKI", "Failed to create directory %s", current.c_str());
+        LOG_ERR("FCARD", "Failed to create directory %s", current.c_str());
         return false;
       }
     }
@@ -381,7 +379,7 @@ bool AnkiDeckIndex::ensureDir(const char* dirPath) {
   return true;
 }
 
-void AnkiDeckIndex::close() {
+void FlashcardDeckIndex::close() {
   if (idxFile.isOpen()) {
     idxFile.close();
   }
@@ -392,11 +390,11 @@ void AnkiDeckIndex::close() {
   opened = false;
 }
 
-bool AnkiDeckIndex::tryOpenValidIndex(const char* idxPath, uint32_t actualDeckSize) {
+bool FlashcardDeckIndex::tryOpenValidIndex(const char* idxPath, uint32_t actualDeckSize) {
   if (!Storage.exists(idxPath)) {
     return false;
   }
-  if (!Storage.openFileForRead("ANKI", idxPath, idxFile)) {
+  if (!Storage.openFileForRead("FCARD", idxPath, idxFile)) {
     return false;
   }
 
@@ -422,22 +420,22 @@ bool AnkiDeckIndex::tryOpenValidIndex(const char* idxPath, uint32_t actualDeckSi
   return true;
 }
 
-bool AnkiDeckIndex::buildIndex(const char* jsonlPath, const char* idxPath, uint32_t actualDeckSize) {
+bool FlashcardDeckIndex::buildIndex(const char* jsonlPath, const char* idxPath, uint32_t actualDeckSize) {
   auto ws = makeUniqueNoThrow<IndexBuildWorkspace>();
   if (!ws) {
-    LOG_ERR("ANKI", "OOM allocating %u-byte index workspace", static_cast<unsigned>(sizeof(IndexBuildWorkspace)));
+    LOG_ERR("FCARD", "OOM allocating %u-byte index workspace", static_cast<unsigned>(sizeof(IndexBuildWorkspace)));
     return false;
   }
 
   auto readBuf = makeUniqueNoThrow<char[]>(STREAM_READ_CHUNK_BYTES);
   if (!readBuf) {
-    LOG_ERR("ANKI", "OOM allocating %u-byte JSONL read chunk", static_cast<unsigned>(STREAM_READ_CHUNK_BYTES));
+    LOG_ERR("FCARD", "OOM allocating %u-byte JSONL read chunk", static_cast<unsigned>(STREAM_READ_CHUNK_BYTES));
     return false;
   }
 
   auto lineBuf = makeUniqueNoThrow<char[]>(MAX_JSONL_LINE_BYTES);
   if (!lineBuf) {
-    LOG_ERR("ANKI", "OOM allocating %u-byte JSONL line buffer", static_cast<unsigned>(MAX_JSONL_LINE_BYTES));
+    LOG_ERR("FCARD", "OOM allocating %u-byte JSONL line buffer", static_cast<unsigned>(MAX_JSONL_LINE_BYTES));
     return false;
   }
 
@@ -459,8 +457,8 @@ bool AnkiDeckIndex::buildIndex(const char* jsonlPath, const char* idxPath, uint3
     Storage.remove(ws->tmpPath.c_str());
   }
 
-  if (!Storage.openFileForWrite("ANKI", ws->tmpPath, ws->tmpFile)) {
-    LOG_ERR("ANKI", "Failed to open %s for write", ws->tmpPath.c_str());
+  if (!Storage.openFileForWrite("FCARD", ws->tmpPath, ws->tmpFile)) {
+    LOG_ERR("FCARD", "Failed to open %s for write", ws->tmpPath.c_str());
     return false;
   }
 
@@ -473,12 +471,12 @@ bool AnkiDeckIndex::buildIndex(const char* jsonlPath, const char* idxPath, uint3
   };
 
   if (!serialization::tryWritePod(ws->tmpFile, ws->newHead)) {
-    LOG_ERR("ANKI", "Failed writing placeholder header to %s", ws->tmpPath.c_str());
+    LOG_ERR("FCARD", "Failed writing placeholder header to %s", ws->tmpPath.c_str());
     return abortTmp();
   }
 
   if (!jsonlFile.seek(0)) {
-    LOG_ERR("ANKI", "Failed seeking %s to start", jsonlPath);
+    LOG_ERR("FCARD", "Failed seeking %s to start", jsonlPath);
     return abortTmp();
   }
 
@@ -492,7 +490,7 @@ bool AnkiDeckIndex::buildIndex(const char* jsonlPath, const char* idxPath, uint3
     const size_t toRead = std::min<size_t>(STREAM_READ_CHUNK_BYTES, actualDeckSize - streamOffset);
     const int bytesRead = jsonlFile.read(readBuf.get(), toRead);
     if (bytesRead <= 0) {
-      LOG_ERR("ANKI", "Short read while indexing %s at offset %u", jsonlPath, static_cast<unsigned>(streamOffset));
+      LOG_ERR("FCARD", "Short read while indexing %s at offset %u", jsonlPath, static_cast<unsigned>(streamOffset));
       return abortTmp();
     }
 
@@ -503,7 +501,7 @@ bool AnkiDeckIndex::buildIndex(const char* jsonlPath, const char* idxPath, uint3
       if (c == '\n') {
         pendingCr = false;
         if (lineOverflowed) {
-          LOG_ERR("ANKI", "Skipping overlong JSONL line (> %u bytes) at offset %u",
+          LOG_ERR("FCARD", "Skipping overlong JSONL line (> %u bytes) at offset %u",
                   static_cast<unsigned>(MAX_JSONL_LINE_BYTES - 1), static_cast<unsigned>(lineStartOffset));
         } else if (lineLen > 0) {
           lineBuf[lineLen] = '\0';
@@ -542,7 +540,7 @@ bool AnkiDeckIndex::buildIndex(const char* jsonlPath, const char* idxPath, uint3
 
   pendingCr = false;
   if (lineOverflowed) {
-    LOG_ERR("ANKI", "Skipping overlong trailing JSONL line (> %u bytes) at offset %u",
+    LOG_ERR("FCARD", "Skipping overlong trailing JSONL line (> %u bytes) at offset %u",
             static_cast<unsigned>(MAX_JSONL_LINE_BYTES - 1), static_cast<unsigned>(lineStartOffset));
   } else if (lineLen > 0) {
     lineBuf[lineLen] = '\0';
@@ -552,29 +550,29 @@ bool AnkiDeckIndex::buildIndex(const char* jsonlPath, const char* idxPath, uint3
   }
 
   if (!ws->tmpFile.seek(0) || !serialization::tryWritePod(ws->tmpFile, ws->newHead)) {
-    LOG_ERR("ANKI", "Failed finalizing index header in %s", ws->tmpPath.c_str());
+    LOG_ERR("FCARD", "Failed finalizing index header in %s", ws->tmpPath.c_str());
     return abortTmp();
   }
   ws->tmpFile.flush();
   if (!ws->tmpFile.close()) {
-    LOG_ERR("ANKI", "Failed closing %s", ws->tmpPath.c_str());
+    LOG_ERR("FCARD", "Failed closing %s", ws->tmpPath.c_str());
     Storage.remove(ws->tmpPath.c_str());
     return false;
   }
 
   if (Storage.exists(idxPath) && !Storage.remove(idxPath)) {
-    LOG_ERR("ANKI", "Failed removing outdated index %s", idxPath);
+    LOG_ERR("FCARD", "Failed removing outdated index %s", idxPath);
     Storage.remove(ws->tmpPath.c_str());
     return false;
   }
   if (!Storage.rename(ws->tmpPath.c_str(), idxPath)) {
-    LOG_ERR("ANKI", "Failed renaming %s to %s", ws->tmpPath.c_str(), idxPath);
+    LOG_ERR("FCARD", "Failed renaming %s to %s", ws->tmpPath.c_str(), idxPath);
     Storage.remove(ws->tmpPath.c_str());
     return false;
   }
 
-  if (!Storage.openFileForRead("ANKI", idxPath, idxFile)) {
-    LOG_ERR("ANKI", "Failed reopening built index %s", idxPath);
+  if (!Storage.openFileForRead("FCARD", idxPath, idxFile)) {
+    LOG_ERR("FCARD", "Failed reopening built index %s", idxPath);
     return false;
   }
 
@@ -583,21 +581,21 @@ bool AnkiDeckIndex::buildIndex(const char* jsonlPath, const char* idxPath, uint3
   return true;
 }
 
-bool AnkiDeckIndex::openOrBuild(const char* jsonlPath, const char* idxPath) {
+bool FlashcardDeckIndex::openOrBuild(const char* jsonlPath, const char* idxPath) {
   close();
   if (!jsonlPath || jsonlPath[0] == '\0' || !idxPath || idxPath[0] == '\0') {
-    LOG_ERR("ANKI", "Invalid deck or index path");
+    LOG_ERR("FCARD", "Invalid deck or index path");
     return false;
   }
 
-  if (!Storage.openFileForRead("ANKI", jsonlPath, jsonlFile)) {
-    LOG_ERR("ANKI", "Failed to open deck %s", jsonlPath);
+  if (!Storage.openFileForRead("FCARD", jsonlPath, jsonlFile)) {
+    LOG_ERR("FCARD", "Failed to open deck %s", jsonlPath);
     return false;
   }
 
   const uint64_t rawSize = static_cast<uint64_t>(jsonlFile.size());
   if (rawSize > std::numeric_limits<uint32_t>::max()) {
-    LOG_ERR("ANKI", "Deck file %s exceeds 4 GB limit", jsonlPath);
+    LOG_ERR("FCARD", "Deck file %s exceeds 4 GB limit", jsonlPath);
     close();
     return false;
   }
@@ -615,11 +613,11 @@ bool AnkiDeckIndex::openOrBuild(const char* jsonlPath, const char* idxPath) {
   return true;
 }
 
-bool AnkiDeckIndex::readIndexRecord(uint32_t ordinal, CardIndexRecord& out) {
+bool FlashcardDeckIndex::readIndexRecord(uint32_t ordinal, CardIndexRecord& out) {
   return readIndexRecords(ordinal, &out, 1);
 }
 
-bool AnkiDeckIndex::readIndexRecords(uint32_t startOrdinal, CardIndexRecord* outBuf, size_t count) {
+bool FlashcardDeckIndex::readIndexRecords(uint32_t startOrdinal, CardIndexRecord* outBuf, size_t count) {
   if (!opened || !outBuf || count == 0) {
     return false;
   }
@@ -633,9 +631,8 @@ bool AnkiDeckIndex::readIndexRecords(uint32_t startOrdinal, CardIndexRecord* out
     return false;
   }
 
-  if (!idxFile.seek(static_cast<size_t>(offset)) ||
-      idxFile.read(outBuf, totalBytes) != static_cast<int>(totalBytes)) {
-    LOG_ERR("ANKI", "Failed reading %u index record(s) at ordinal %u", static_cast<unsigned>(count),
+  if (!idxFile.seek(static_cast<size_t>(offset)) || idxFile.read(outBuf, totalBytes) != static_cast<int>(totalBytes)) {
+    LOG_ERR("FCARD", "Failed reading %u index record(s) at ordinal %u", static_cast<unsigned>(count),
             static_cast<unsigned>(startOrdinal));
     return false;
   }
@@ -644,7 +641,7 @@ bool AnkiDeckIndex::readIndexRecords(uint32_t startOrdinal, CardIndexRecord* out
     const CardIndexRecord& rec = outBuf[i];
     if (rec.byteLength == 0 || rec.byteLength >= MAX_JSONL_LINE_BYTES ||
         static_cast<uint64_t>(rec.byteOffset) + rec.byteLength > head.deckFileSize) {
-      LOG_ERR("ANKI", "Corrupt index record bounds at ordinal %u", static_cast<unsigned>(startOrdinal + i));
+      LOG_ERR("FCARD", "Corrupt index record bounds at ordinal %u", static_cast<unsigned>(startOrdinal + i));
       return false;
     }
   }
@@ -652,9 +649,9 @@ bool AnkiDeckIndex::readIndexRecords(uint32_t startOrdinal, CardIndexRecord* out
   return true;
 }
 
-bool AnkiDeckIndex::readCard(uint32_t ordinal, char* lineScratch, size_t scratchSize, AnkiCard& outCard) {
+bool FlashcardDeckIndex::readCard(uint32_t ordinal, char* lineScratch, size_t scratchSize, FlashcardItem& outCard) {
   if (!opened || !lineScratch || scratchSize == 0) {
-    LOG_ERR("ANKI", "Cannot read card: index closed or invalid scratch buffer");
+    LOG_ERR("FCARD", "Cannot read card: index closed or invalid scratch buffer");
     return false;
   }
 
@@ -664,14 +661,14 @@ bool AnkiDeckIndex::readCard(uint32_t ordinal, char* lineScratch, size_t scratch
   }
 
   if (static_cast<size_t>(rec.byteLength) + 1 > scratchSize) {
-    LOG_ERR("ANKI", "Scratch buffer (%u B) too small for %u-byte card line", static_cast<unsigned>(scratchSize),
+    LOG_ERR("FCARD", "Scratch buffer (%u B) too small for %u-byte card line", static_cast<unsigned>(scratchSize),
             static_cast<unsigned>(rec.byteLength));
     return false;
   }
 
   if (!jsonlFile.seek(rec.byteOffset) ||
       jsonlFile.read(lineScratch, rec.byteLength) != static_cast<int>(rec.byteLength)) {
-    LOG_ERR("ANKI", "Failed reading card JSONL at offset %u", static_cast<unsigned>(rec.byteOffset));
+    LOG_ERR("FCARD", "Failed reading card JSONL at offset %u", static_cast<unsigned>(rec.byteOffset));
     return false;
   }
   lineScratch[rec.byteLength] = '\0';
@@ -679,7 +676,7 @@ bool AnkiDeckIndex::readCard(uint32_t ordinal, char* lineScratch, size_t scratch
   JsonDocument doc;
   const DeserializationError err = deserializeJson(doc, lineScratch, rec.byteLength);
   if (err != DeserializationError::Ok || doc.overflowed() || !doc.is<JsonObjectConst>()) {
-    LOG_ERR("ANKI", "Malformed card JSON at ordinal %u", static_cast<unsigned>(ordinal));
+    LOG_ERR("FCARD", "Malformed card JSON at ordinal %u", static_cast<unsigned>(ordinal));
     return false;
   }
 
@@ -692,4 +689,4 @@ bool AnkiDeckIndex::readCard(uint32_t ordinal, char* lineScratch, size_t scratch
   return true;
 }
 
-}  // namespace anki
+}  // namespace flashcards

@@ -17,6 +17,7 @@
 #include "components/icons/book.h"
 #include "components/icons/bookmark.h"
 #include "components/icons/cover.h"
+#include "components/icons/flashcards.h"
 #include "components/icons/folder.h"
 #include "components/icons/hotspot.h"
 #include "components/icons/library.h"
@@ -50,6 +51,8 @@ const uint8_t* iconForName(UIIcon icon) {
       return TransferIcon;
     case UIIcon::Library:
       return LibraryIcon;
+    case UIIcon::Flashcards:
+      return FlashcardsIcon;
     case UIIcon::Plugins:
       return BlocksIcon;
     case UIIcon::Wifi:
@@ -309,14 +312,25 @@ void LyraTheme::drawEmptyRecents(const GfxRenderer& renderer, const Rect rect) c
   renderer.drawText(UI_10_FONT_ID, rect.x + padding, rect.y + rect.height / 2 + 2, tr(STR_START_READING), true);
 }
 
+int LyraTheme::getHomeMenuRowHeight(const GfxRenderer& renderer, const int menuTop, const int itemCount) const {
+  if (itemCount <= 5) {
+    return getMenuRowHeight(renderer);
+  }
+  const int bottomLimit =
+      renderer.getScreenHeight() - (gpio.hasTouch() ? 8 : LyraMetrics::values.buttonHintsHeight + 4);
+  const int availHeight = bottomLimit - menuTop;
+  const int fitted = (availHeight - (itemCount - 1) * LyraMetrics::values.menuSpacing) / itemCount;
+  return std::max(mainMenuIconSize, std::min(LyraMetrics::values.menuRowHeight, fitted));
+}
+
 void LyraTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount, int selectedIndex,
                                const std::function<std::string(int index)>& buttonLabel,
                                const std::function<UIIcon(int index)>& rowIcon) const {
+  const int rowHeight = getHomeMenuRowHeight(renderer, rect.y, buttonCount);
   for (int i = 0; i < buttonCount; ++i) {
     int tileWidth = rect.width - LyraMetrics::values.contentSidePadding * 2;
     Rect tileRect = Rect{rect.x + LyraMetrics::values.contentSidePadding,
-                         rect.y + i * (LyraMetrics::values.menuRowHeight + LyraMetrics::values.menuSpacing), tileWidth,
-                         LyraMetrics::values.menuRowHeight};
+                         rect.y + i * (rowHeight + LyraMetrics::values.menuSpacing), tileWidth, rowHeight};
 
     const bool selected = selectedIndex == i;
 
@@ -328,13 +342,14 @@ void LyraTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount
     const char* label = labelStr.c_str();
     int textX = tileRect.x + 16;
     const int lineHeight = renderer.getLineHeight(UI_12_FONT_ID);
-    const int textY = tileRect.y + (LyraMetrics::values.menuRowHeight - lineHeight) / 2;
+    const int textY = tileRect.y + (rowHeight - lineHeight) / 2;
 
     if (rowIcon != nullptr) {
       UIIcon icon = rowIcon(i);
       const uint8_t* iconBitmap = iconForName(icon);
       if (iconBitmap != nullptr) {
-        renderer.drawIcon(iconBitmap, textX, textY, mainMenuIconSize);
+        const int iconY = std::min(textY, tileRect.y + std::max(0, rowHeight - mainMenuIconSize));
+        renderer.drawIcon(iconBitmap, textX, iconY, mainMenuIconSize);
         textX += mainMenuIconSize + hPaddingInSelection + 2;
       }
     }
