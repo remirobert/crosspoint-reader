@@ -186,9 +186,8 @@ On Xteink X4 / X3 (`ESP32-C3`), battery sleep (`HalPowerManager::startDeepSleep(
 Therefore, time is modeled per deck as an integer **`currentSessionDay` (`1, 2, 3, ...`)** where **1 completed deck session = 1 day**:
 - **Mid-session power-off**: If the user sleeps or powers off with cards still remaining in `currentSessionDay`, `sessionCompleted == 0`. Waking up reconstructs the exact remaining due/learning cards plus the remaining `newPerDay - newThisSession` budget for the *same* `currentSessionDay`.
 - **Session completion**: Once active cards in `currentSessionDay` hit `0`, a `WalOp::SessionComplete` marker is written (`sessionCompleted = 1`) and the **Session Complete** summary is shown.
-- **Next session advance**: Opening a deck whose `sessionCompleted == 1` (or choosing *Start Next Session*) advances `currentSessionDay`:
-  - Normally `nextDay = currentSessionDay + 1`.
-  - **Empty-day fast-forward**: If `0` unseen New cards remain in the deck *and* no card has `dueDay <= currentSessionDay + 1`, `nextDay` jumps directly to `min(card.dueDay)` across reviewed cards so mastered decks never present empty sessions.
+- **Next session advance**: Choosing *Start Session N+1* on the Session Complete screen (or *Start Next Session (S\<N+1\>)* in the Deck Options popup) always advances `currentSessionDay` by strict `+1` (`S1 -> S2 -> S3 -> ...`, saturating at `UINT32_MAX`):
+  - **Empty sessions (`0 due, 0 new`)**: If a non-empty deck has zero due cards and zero new-card slots on `currentSessionDay`, `FlashcardSession` marks `sessionCompleted = 1` immediately instead of fast-forwarding `currentSessionDay`. The Session Complete screen shows `"No cards due this session"` (plus `"Next due: Session <D>"` inside the `Up Next` box when future reviews are scheduled after `N+1`), letting the user either drill studied cards via **Practice Again** without mutating SRS or step sequentially forward (`S2 -> S3 -> ...`) with truthful FSRS `elapsedDays`.
 
 ### 4.2 FSRS-5 Math (`FlashcardScheduler`)
 Uses FSRS-5's 19 published default weights stored in flash (`76 bytes` of `constexpr float`):
@@ -259,7 +258,7 @@ Following `.agents/rules/hardware-resources.md`:
    - `ctest` exercises:
      - `.jsonl` indexing (malformed lines, missing `id` fallback hashing, `_meta` parsing, >4 KB line skipping, automatic `.idx` invalidation on file size change).
      - FSRS-5 transitions (`New`, `Learning`, `Review`, `Relearning`, 3-button and 4-button paths, interval monotonicity).
-     - WAL replay, corrupt trailing WAL truncation (simulated power loss), `.srs` compaction, mid-session cold-boot reconstruction, and empty-day fast-forwarding.
+     - WAL replay, corrupt trailing WAL truncation (simulated power loss), `.srs` compaction, mid-session cold-boot reconstruction, and strict `+1` session progression across empty days.
 
 2. **Git Branching for Upstream Merges**:
    - Keep `upstream` pointing to `https://github.com/crosspoint-reader/crosspoint-reader.git`.
@@ -310,12 +309,14 @@ The user experience combines CrossPoint's native Lyra/FreeInkUI chrome with mono
 
 5. **Deck Options Popup & Session Complete Boundary**:
    - **Hold `Confirm` on Deck Picker** (`OptionPopup`):
-     - `Start Next Session (S<N+1>)` — advances `currentSessionDay` immediately (with empty-day fast-forward).
+     - `Start Next Session (S<N+1>)` — advances `currentSessionDay` sequentially by `+1`.
      - `New Cards / Session: <10 | 20 | 30 | 50>` — cycles per-deck new-card allowance stored in `.srs`.
      - `Reset Deck Progress` — guarded by `ConfirmationActivity` before deleting `<hash>.srs` and `<hash>.wal`.
-   - **Session Complete Screen**:
-     - Shown automatically when the active queue hits `0` (`sessionCompleted = 1`) and when opening an already-completed deck from the Deck Picker.
-     - Displays completed session number, total ratings recorded, and a preview box (`Up Next (Session N+1): <due> due · <new> new`), with a double-bordered `"Start Session <N+1> Now"` pill (`Confirm` advances session; `Back` returns to Deck Picker).
+   - **Session Complete Screen & Free Review ("Practice Again")**:
+     - Shown automatically when the active queue hits `0` (`sessionCompleted = 1`), when an empty `+1` session has `0 due, 0 new` cards, and when opening an already-completed deck from the Deck Picker.
+     - Displays completed session number, total ratings recorded (`"No cards due this session"` when `reviewsThisSession == 0`, or `"Free Review Complete"` / `"Reviewed N review(s) (SRS unchanged)"` right after a Free Review pass), and a preview box (`Up Next (Session N+1): <due> due, <new> new`, adding a second line `"Next due: Session <D>"` when `0 due, 0 new` and future cards are scheduled after `N+1`).
+     - When studied cards exist (`countFreeReviewCards() > 0`), displays two side-by-side focusable pills: **`Practice Again`** (left) and **`Start Session N+1`** (right, pre-focused by default so `Confirm` preserves muscle memory).
+     - **Free Review mode (`FlashcardSession::startFreeReview`)**: Re-loads the just-completed session's cards (`lastReviewDay == currentSessionDay`, falling back to studied cards if empty) into an ephemeral in-RAM practice queue (`<= 256` slots). Header shows `"Free | <N> left"`, Card Back shows `"Free review - SRS unchanged"` above 2 wide pills (**`Again`** re-queues 6 ahead in RAM; **`Got It`** pre-focused clears from the pass), `.srs` and `.wal` receive **zero writes**, and `APP_STATE.lastSleepFromFlashcards` is not set (avoiding SD `state.json` writes and waking cleanly after power-off).
 
 ### 7.2 Physical Button & Touch Mapping Matrix
 
@@ -324,6 +325,6 @@ All inputs route through `MappedInputManager::Button` (respecting user front/sid
 | Screen / State | `Back` (`btn1`) | `Confirm` (`btn2`) | `Left` (`btn3`) | `Right` (`btn4`) | Side `Up` / `Down` | Touch Boards (S3 / Pro) |
 |---|---|---|---|---|---|---|
 | **Deck Picker** | Go Home (`FLASHCARDS` selected) | Open deck (Hold: `OptionPopup`) | Previous deck | Next deck | Previous / Next deck | Tap row to open; long-press row for `OptionPopup` |
-| **Card Front** | Exit to Deck Picker (flushes `.wal` -> `.srs`) | **Show answer** (`focus = Good`) | — | — | `Down` also reveals answer | Tap `"Show answer"` pill (or card body) to reveal; header `<` exits |
-| **Card Back (Design A)** | Exit to Deck Picker (preserves mid-session state) | **Submit focused rating** (hint dynamically shows `Again`/`Hard`/`Good`/`Easy`) | Move focus left (`Easy -> Good -> Hard -> Again`) | Move focus right (`Again -> Hard -> Good -> Easy`) | Scroll multi-page `extra` note up/down | Tap any of the 4 rating pills directly to submit; swipe up/down scrolls long notes |
-| **Session Complete** | Return to Deck Picker | **Start Next Session** (`SessionAdvance`) | — | — | — | Tap `"Start Session N+1 Now"` pill; header `<` returns to Deck Picker |
+| **Card Front** | Exit to Deck Picker (flushes `.wal` -> `.srs`) | **Show answer** (`focus = Good` or `Got It`) | — | — | `Down` also reveals answer | Tap `"Show answer"` pill (or card body) to reveal; header `<` exits |
+| **Card Back (Design A)** | Exit to Deck Picker (preserves mid-session state) | **Submit focused choice** (`Again`/`Hard`/`Good`/`Easy`, or `Again`/`Got It` in Free Review) | Move focus left | Move focus right | Scroll multi-page `extra` note up/down | Tap any rating pill directly to submit; swipe up/down scrolls long notes |
+| **Session Complete** | Return to Deck Picker | **Practice Again** or **Start Next Session** | Focus `Practice Again` | Focus `Start Session N+1` | — | Tap `"Practice Again"` or `"Start Session N+1"` pill; header `<` returns to Deck Picker |

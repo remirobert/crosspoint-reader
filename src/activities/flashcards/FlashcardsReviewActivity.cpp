@@ -147,6 +147,35 @@ void drawFocusPill(const GfxRenderer& renderer, const Rect& rect, const char* la
   }
 }
 
+void drawFocusPillTruncated(const GfxRenderer& renderer, const Rect& rect, const char* label, const int fontId,
+                            const bool focused) {
+  if (rect.width <= 0 || rect.height <= 0 || !label || label[0] == '\0') {
+    drawFocusPill(renderer, rect, label, fontId, focused);
+    return;
+  }
+  const EpdFontFamily::Style style = focused ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR;
+  const int maxTextW = std::max(8, rect.width - (FOCUS_RING_INNER_INSET + 4) * 2);
+  if (renderer.getTextWidth(fontId, label, style) <= maxTextW) {
+    drawFocusPill(renderer, rect, label, fontId, focused);
+    return;
+  }
+  const std::string truncated = renderer.truncatedText(fontId, label, maxTextW, style);
+  drawFocusPill(renderer, rect, truncated.c_str(), fontId, focused);
+}
+
+void drawCenteredLineTruncated(const GfxRenderer& renderer, const Rect& bounds, const int fontId, const int y,
+                               const char* text, const EpdFontFamily::Style style = EpdFontFamily::REGULAR) {
+  if (!text || text[0] == '\0' || bounds.width <= 0) {
+    return;
+  }
+  if (renderer.getTextWidth(fontId, text, style) <= bounds.width) {
+    UITheme::drawCenteredText(renderer, bounds, fontId, y, text, true, style);
+    return;
+  }
+  const std::string clipped = renderer.truncatedText(fontId, text, bounds.width, style);
+  UITheme::drawCenteredText(renderer, bounds, fontId, y, clipped.c_str(), true, style);
+}
+
 void drawCheckmarkCircle(const GfxRenderer& renderer, const int cx, const int cy, const int radius) {
   if (radius <= 4) {
     return;
@@ -412,7 +441,8 @@ void FlashcardsReviewActivity::prepareForSleep() {
     return;
   }
 
-  if (state != State::SessionComplete && firstReviewFrameRendered.load(std::memory_order_acquire)) {
+  const bool inFreeReview = session && session->isFreeReview();
+  if (state != State::SessionComplete && !inFreeReview && firstReviewFrameRendered.load(std::memory_order_acquire)) {
     APP_STATE.openFlashcardsPath = deckPath;
     APP_STATE.lastSleepFromFlashcards = true;
     APP_STATE.flashcardsActivityLoadCount = 0;
@@ -448,6 +478,7 @@ bool FlashcardsReviewActivity::loadActiveCardState() {
 
   state = State::CardFront;
   focusedRating = flashcards::Rating::Good;
+  freeReviewFocusGotIt = true;
   extraPage = 0;
   cardLayoutValid = false;
   showAnswerPillRect = Rect{};
@@ -455,13 +486,14 @@ bool FlashcardsReviewActivity::loadActiveCardState() {
   for (Rect& r : ratingPillRects) {
     r = Rect{};
   }
+  freeReviewPillRect = Rect{};
   nextSessionPillRect = Rect{};
 
   prewarmActiveCardGlyphs();
   return true;
 }
 
-void FlashcardsReviewActivity::enterSessionCompleteState() {
+void FlashcardsReviewActivity::populateSessionCompleteMetrics() {
   state = State::SessionComplete;
   cardLayoutValid = false;
   showAnswerPillRect = Rect{};
@@ -469,18 +501,28 @@ void FlashcardsReviewActivity::enterSessionCompleteState() {
   for (Rect& r : ratingPillRects) {
     r = Rect{};
   }
+  freeReviewPillRect = Rect{};
   nextSessionPillRect = Rect{};
+  focusFreeReviewOnComplete = false;
 
   if (session && session->isOpen()) {
     nextSessionDay = session->computeNextSessionDay();
-    session->previewNextSession(nextDueCount, nextNewCount);
-    renderer.prewarmFallbackText(UI_12_FONT_ID, session->deckTitle(), EpdFontFamily::BOLD);
+    session->previewNextSession(nextDueCount, nextNewCount, &nextScheduledDueDay);
+    freeReviewCount = session->countFreeReviewCards();
   } else {
     nextSessionDay = 1;
     nextDueCount = 0;
     nextNewCount = 0;
+    nextScheduledDueDay = 0;
+    freeReviewCount = 0;
   }
+}
 
+void FlashcardsReviewActivity::enterSessionCompleteState() {
+  populateSessionCompleteMetrics();
+  if (session && session->isOpen()) {
+    renderer.prewarmFallbackText(UI_12_FONT_ID, session->deckTitle(), EpdFontFamily::BOLD);
+  }
   clearSleepResumeState();
 }
 
@@ -493,7 +535,7 @@ void FlashcardsReviewActivity::clearSleepResumeState() {
 }
 
 void FlashcardsReviewActivity::saveSleepResumeStateIfReady() {
-  if (reviewStateSaved || state == State::SessionComplete ||
+  if (reviewStateSaved || state == State::SessionComplete || (session && session->isFreeReview()) ||
       !firstReviewFrameRendered.load(std::memory_order_acquire)) {
     return;
   }
@@ -520,6 +562,7 @@ void FlashcardsReviewActivity::flipToBack() {
     }
     state = State::CardBack;
     focusedRating = flashcards::Rating::Good;
+    freeReviewFocusGotIt = true;
     extraPage = 0;
   }
   requestUpdate();
@@ -532,11 +575,20 @@ void FlashcardsReviewActivity::stepFocusedRating(const int delta) {
     if (state != State::CardBack) {
       return;
     }
-    const int curIdx = ratingToIndex(focusedRating);
-    const int nextIdx = std::clamp(curIdx + delta, 0, 3);
-    if (nextIdx != curIdx) {
-      focusedRating = RATING_SPECS[nextIdx].rating;
-      changed = true;
+    if (session && session->isFreeReview()) {
+      const int curIdx = freeReviewFocusGotIt ? 1 : 0;
+      const int nextIdx = std::clamp(curIdx + delta, 0, 1);
+      if (nextIdx != curIdx) {
+        freeReviewFocusGotIt = (nextIdx == 1);
+        changed = true;
+      }
+    } else {
+      const int curIdx = ratingToIndex(focusedRating);
+      const int nextIdx = std::clamp(curIdx + delta, 0, 3);
+      if (nextIdx != curIdx) {
+        focusedRating = RATING_SPECS[nextIdx].rating;
+        changed = true;
+      }
     }
   }
   if (changed) {
@@ -559,10 +611,7 @@ void FlashcardsReviewActivity::submitActiveRating(const flashcards::Rating ratin
     } else if (session->isSessionComplete() || session->remainingCount() == 0) {
       forcedRefreshPending = true;
       enteredComplete = true;
-      state = State::SessionComplete;
-      cardLayoutValid = false;
-      nextSessionDay = session->computeNextSessionDay();
-      session->previewNextSession(nextDueCount, nextNewCount);
+      populateSessionCompleteMetrics();
     } else {
       if (cardsUntilFullRefresh <= 1) {
         forcedRefreshPending = true;
@@ -585,6 +634,99 @@ void FlashcardsReviewActivity::submitActiveRating(const flashcards::Rating ratin
 
   if (enteredComplete) {
     clearSleepResumeState();
+  }
+
+  requestUpdate();
+}
+
+void FlashcardsReviewActivity::submitFreeReviewChoice(const bool repeatAgain) {
+  bool enteredComplete = false;
+  bool failed = false;
+  {
+    RenderLock lock(*this);
+    if (!session || !session->isOpen() || !session->isFreeReview() || state != State::CardBack) {
+      return;
+    }
+
+    if (!session->submitFreeReview(repeatAgain)) {
+      LOG_ERR("FCARD", "Failed submitting free review for deck: %s", deckPath.c_str());
+      failed = true;
+    } else if (session->isSessionComplete() || session->remainingCount() == 0) {
+      forcedRefreshPending = true;
+      enteredComplete = true;
+      populateSessionCompleteMetrics();
+    } else {
+      if (cardsUntilFullRefresh <= 1) {
+        forcedRefreshPending = true;
+        cardsUntilFullRefresh = SETTINGS.getRefreshFrequency();
+      } else {
+        --cardsUntilFullRefresh;
+      }
+
+      if (!loadActiveCardState()) {
+        LOG_ERR("FCARD", "Failed loading next free-review card: %s", deckPath.c_str());
+        failed = true;
+      }
+    }
+  }
+
+  if (failed) {
+    exitToDeckList();
+    return;
+  }
+
+  if (enteredComplete) {
+    clearSleepResumeState();
+  }
+
+  requestUpdate();
+}
+
+void FlashcardsReviewActivity::stepCompleteFocus(const int delta) {
+  bool changed = false;
+  {
+    RenderLock lock(*this);
+    if (state != State::SessionComplete || freeReviewCount == 0) {
+      return;
+    }
+    const int curIdx = focusFreeReviewOnComplete ? 0 : 1;
+    const int nextIdx = std::clamp(curIdx + delta, 0, 1);
+    if (nextIdx != curIdx) {
+      focusFreeReviewOnComplete = (nextIdx == 0);
+      changed = true;
+    }
+  }
+  if (changed) {
+    requestUpdate();
+  }
+}
+
+void FlashcardsReviewActivity::beginFreeReview() {
+  bool failed = false;
+  {
+    RenderLock lock(*this);
+    if (!session || !session->isOpen() || state != State::SessionComplete || freeReviewCount == 0) {
+      return;
+    }
+
+    if (!session->startFreeReview()) {
+      LOG_ERR("FCARD", "Could not start free review: %s", deckPath.c_str());
+      freeReviewCount = 0;
+      focusFreeReviewOnComplete = false;
+      freeReviewPillRect = Rect{};
+    } else {
+      forcedRefreshPending = true;
+      cardsUntilFullRefresh = SETTINGS.getRefreshFrequency();
+      if (!loadActiveCardState()) {
+        LOG_ERR("FCARD", "Failed loading first free-review card: %s", deckPath.c_str());
+        failed = true;
+      }
+    }
+  }
+
+  if (failed) {
+    exitToDeckList();
+    return;
   }
 
   requestUpdate();
@@ -616,8 +758,7 @@ void FlashcardsReviewActivity::advanceToNextSession() {
       }
     } else {
       forcedRefreshPending = true;
-      nextSessionDay = session->computeNextSessionDay();
-      session->previewNextSession(nextDueCount, nextNewCount);
+      populateSessionCompleteMetrics();
     }
   }
 
@@ -697,7 +838,8 @@ void FlashcardsReviewActivity::ensureCardLayout(const Rect& promptBandRect, cons
   answerPages.clear();
 
   // 1. Prompt band layout (identical in CardFront and CardBack).
-  const bool isNew = (currentSrs.state == static_cast<uint8_t>(flashcards::CardState::New));
+  const bool isFree = session && session->isFreeReview();
+  const bool isNew = !isFree && (currentSrs.state == static_cast<uint8_t>(flashcards::CardState::New));
   const int smallLineH = renderer.getLineHeight(SMALL_FONT_ID);
   const int newBadgeReserve = isNew ? (smallLineH + 10) : 0;
 
@@ -894,12 +1036,20 @@ void FlashcardsReviewActivity::loop() {
 
     case State::CardBack: {
       if (consumeReleaseWithGuard(mappedInput, MappedInputManager::Button::Confirm, suppressConfirmRelease)) {
+        bool isFree = false;
+        bool repeatAgain = false;
         flashcards::Rating chosen = flashcards::Rating::Good;
         {
           RenderLock lock(*this);
+          isFree = session && session->isFreeReview();
+          repeatAgain = !freeReviewFocusGotIt;
           chosen = focusedRating;
         }
-        submitActiveRating(chosen);
+        if (isFree) {
+          submitFreeReviewChoice(repeatAgain);
+        } else {
+          submitActiveRating(chosen);
+        }
         return;
       }
 
@@ -941,10 +1091,13 @@ void FlashcardsReviewActivity::loop() {
         int tx = 0;
         int ty = 0;
         if (mappedInput.wasScreenTapped(tx, ty)) {
+          bool isFree = false;
           int hitIndex = -1;
           {
             RenderLock lock(*this);
-            for (int i = 0; i < 4; ++i) {
+            isFree = session && session->isFreeReview();
+            const int pillCount = isFree ? 2 : 4;
+            for (int i = 0; i < pillCount; ++i) {
               if (rectContains(ratingPillRects[i], tx, ty, TOUCH_HIT_PAD_Y + 12)) {
                 hitIndex = i;
                 break;
@@ -953,7 +1106,11 @@ void FlashcardsReviewActivity::loop() {
           }
           if (hitIndex >= 0) {
             haptic_feedback::touchAction();
-            submitActiveRating(RATING_SPECS[hitIndex].rating);
+            if (isFree) {
+              submitFreeReviewChoice(hitIndex == 0);
+            } else {
+              submitActiveRating(RATING_SPECS[hitIndex].rating);
+            }
             return;
           }
         }
@@ -963,7 +1120,27 @@ void FlashcardsReviewActivity::loop() {
 
     case State::SessionComplete: {
       if (consumeReleaseWithGuard(mappedInput, MappedInputManager::Button::Confirm, suppressConfirmRelease)) {
-        advanceToNextSession();
+        bool startFree = false;
+        {
+          RenderLock lock(*this);
+          startFree = (freeReviewCount > 0 && focusFreeReviewOnComplete);
+        }
+        if (startFree) {
+          beginFreeReview();
+        } else {
+          advanceToNextSession();
+        }
+        return;
+      }
+
+      const bool swapFront = mappedInput.isNavDirectionSwapped();
+      const auto prevBtn = swapFront ? MappedInputManager::Button::Right : MappedInputManager::Button::Left;
+      const auto nextBtn = swapFront ? MappedInputManager::Button::Left : MappedInputManager::Button::Right;
+      int focusDelta = 0;
+      buttonNavigator.onPressAndContinuous({prevBtn}, [&focusDelta] { focusDelta = -1; });
+      buttonNavigator.onPressAndContinuous({nextBtn}, [&focusDelta] { focusDelta = 1; });
+      if (focusDelta != 0) {
+        stepCompleteFocus(focusDelta);
         return;
       }
 
@@ -971,12 +1148,19 @@ void FlashcardsReviewActivity::loop() {
         int tx = 0;
         int ty = 0;
         if (mappedInput.wasScreenTapped(tx, ty)) {
-          bool hit = false;
+          bool hitFree = false;
+          bool hitNext = false;
           {
             RenderLock lock(*this);
-            hit = rectContains(nextSessionPillRect, tx, ty, TOUCH_HIT_PAD_Y);
+            hitFree = (freeReviewCount > 0) && rectContains(freeReviewPillRect, tx, ty, TOUCH_HIT_PAD_Y);
+            hitNext = !hitFree && rectContains(nextSessionPillRect, tx, ty, TOUCH_HIT_PAD_Y);
           }
-          if (hit) {
+          if (hitFree) {
+            haptic_feedback::touchAction();
+            beginFreeReview();
+            return;
+          }
+          if (hitNext) {
             haptic_feedback::touchAction();
             advanceToNextSession();
             return;
@@ -989,7 +1173,8 @@ void FlashcardsReviewActivity::loop() {
 }
 
 void FlashcardsReviewActivity::renderPromptBand(const Rect& promptBandRect) const {
-  const bool isNew = (currentSrs.state == static_cast<uint8_t>(flashcards::CardState::New));
+  const bool isFree = session && session->isFreeReview();
+  const bool isNew = !isFree && (currentSrs.state == static_cast<uint8_t>(flashcards::CardState::New));
   const int smallLineH = renderer.getLineHeight(SMALL_FONT_ID);
   const int newPillH = smallLineH + 6;
   const int promptLineH = std::max(1, renderer.getLineHeight(promptFontId));
@@ -1062,8 +1247,12 @@ void FlashcardsReviewActivity::scanAnswerPageGlyphs(const uint16_t pageIdx) cons
 }
 
 void FlashcardsReviewActivity::renderCardFront(const Rect& safeArea, const Rect& headerRect) {
-  char rightLabel[24];
-  snprintf(rightLabel, sizeof(rightLabel), "%u left", static_cast<unsigned>(session->remainingCount()));
+  char rightLabel[32];
+  if (session->isFreeReview()) {
+    snprintf(rightLabel, sizeof(rightLabel), "Free | %u left", static_cast<unsigned>(session->remainingCount()));
+  } else {
+    snprintf(rightLabel, sizeof(rightLabel), "%u left", static_cast<unsigned>(session->remainingCount()));
+  }
   GUI.drawHeader(renderer, headerRect, session->deckTitle(), rightLabel, true);
 
   const ReviewLayout layout = computeReviewLayout(renderer, safeArea, headerRect);
@@ -1088,8 +1277,12 @@ void FlashcardsReviewActivity::renderCardFront(const Rect& safeArea, const Rect&
 }
 
 void FlashcardsReviewActivity::renderCardBack(const Rect& safeArea, const Rect& headerRect) {
-  char rightLabel[24];
-  snprintf(rightLabel, sizeof(rightLabel), "%u left", static_cast<unsigned>(session->remainingCount()));
+  char rightLabel[32];
+  if (session->isFreeReview()) {
+    snprintf(rightLabel, sizeof(rightLabel), "Free | %u left", static_cast<unsigned>(session->remainingCount()));
+  } else {
+    snprintf(rightLabel, sizeof(rightLabel), "%u left", static_cast<unsigned>(session->remainingCount()));
+  }
   GUI.drawHeader(renderer, headerRect, session->deckTitle(), rightLabel, true);
 
   const ReviewLayout layout = computeReviewLayout(renderer, safeArea, headerRect);
@@ -1150,6 +1343,28 @@ void FlashcardsReviewActivity::renderCardBack(const Rect& safeArea, const Rect& 
     drawCardContent();
   }
 
+  if (session->isFreeReview()) {
+    UITheme::drawCenteredText(renderer, layout.body, SMALL_FONT_ID, layout.previewLabelY, "Free review - SRS unchanged",
+                              true, EpdFontFamily::REGULAR);
+
+    constexpr int pillGap = 8;
+    const int pillWidth = std::max(24, (layout.body.width - pillGap) / 2);
+    const int totalBarWidth = pillWidth * 2 + pillGap;
+    const int startX = layout.body.x + (layout.body.width - totalBarWidth) / 2;
+
+    ratingPillRects[0] = Rect{startX, layout.pillY, pillWidth, layout.pillHeight};
+    ratingPillRects[1] = Rect{startX + pillWidth + pillGap, layout.pillY, pillWidth, layout.pillHeight};
+    ratingPillRects[2] = Rect{};
+    ratingPillRects[3] = Rect{};
+
+    drawFocusPillTruncated(renderer, ratingPillRects[0], "Again", UI_10_FONT_ID, !freeReviewFocusGotIt);
+    drawFocusPillTruncated(renderer, ratingPillRects[1], "Got It", UI_10_FONT_ID, freeReviewFocusGotIt);
+
+    const auto labels = mappedInput.mapLabels("Back", freeReviewFocusGotIt ? "Got It" : "Again", "<", ">");
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    return;
+  }
+
   constexpr int pillGap = 8;
   const int pillWidth = std::max(24, (layout.body.width - pillGap * 3) / 4);
   const int totalBarWidth = pillWidth * 4 + pillGap * 3;
@@ -1180,7 +1395,7 @@ void FlashcardsReviewActivity::renderCardBack(const Rect& safeArea, const Rect& 
 }
 
 void FlashcardsReviewActivity::renderSessionComplete(const Rect& safeArea, const Rect& headerRect) {
-  char textBuf[64];
+  char textBuf[96];
   snprintf(textBuf, sizeof(textBuf), "S%u Done", static_cast<unsigned>(session->sessionDay()));
   GUI.drawHeader(renderer, headerRect, session->deckTitle(), textBuf, true);
 
@@ -1195,7 +1410,6 @@ void FlashcardsReviewActivity::renderSessionComplete(const Rect& safeArea, const
   constexpr int bottomPad = 12;
   const int pillHeight = std::clamp(bodyHeight / 11, 42, 50);
   const int pillY = bodyBottom - bottomPad - pillHeight;
-  nextSessionPillRect = Rect{bodyX, pillY, bodyWidth, pillHeight};
 
   const int summaryAvailH = std::max(80, pillY - 10 - bodyTop);
   const int circleRadius = (summaryAvailH < 340) ? 18 : 24;
@@ -1220,19 +1434,35 @@ void FlashcardsReviewActivity::renderSessionComplete(const Rect& safeArea, const
 
     const auto labels = mappedInput.mapLabels("Decks", "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    freeReviewPillRect = Rect{};
     nextSessionPillRect = Rect{};
     return;
   }
 
-  snprintf(textBuf, sizeof(textBuf), "Session %u Complete", static_cast<unsigned>(session->sessionDay()));
-  UITheme::drawCenteredText(renderer, bodyRect, UI_12_FONT_ID, y, textBuf, true, EpdFontFamily::BOLD);
-  y += titleLineH + gap2;
+  if (session->lastPassWasFreeReview()) {
+    UITheme::drawCenteredText(renderer, bodyRect, UI_12_FONT_ID, y, "Free Review Complete", true, EpdFontFamily::BOLD);
+    y += titleLineH + gap2;
 
-  const uint32_t reviewed = session->reviewsThisSession();
-  snprintf(textBuf, sizeof(textBuf), "Reviewed %u %s", static_cast<unsigned>(reviewed),
-           reviewed == 1 ? "rating" : "ratings");
-  UITheme::drawCenteredText(renderer, bodyRect, UI_10_FONT_ID, y, textBuf, true, EpdFontFamily::REGULAR);
-  y += subLineH + gap3;
+    const uint32_t freeReviewed = session->freeReviewRatingsCount();
+    snprintf(textBuf, sizeof(textBuf), "Reviewed %u %s (SRS unchanged)", static_cast<unsigned>(freeReviewed),
+             freeReviewed == 1 ? "review" : "reviews");
+    drawCenteredLineTruncated(renderer, bodyRect, UI_10_FONT_ID, y, textBuf);
+    y += subLineH + gap3;
+  } else {
+    snprintf(textBuf, sizeof(textBuf), "Session %u Complete", static_cast<unsigned>(session->sessionDay()));
+    UITheme::drawCenteredText(renderer, bodyRect, UI_12_FONT_ID, y, textBuf, true, EpdFontFamily::BOLD);
+    y += titleLineH + gap2;
+
+    const uint32_t reviewed = session->reviewsThisSession();
+    if (reviewed == 0) {
+      snprintf(textBuf, sizeof(textBuf), "No cards due this session");
+    } else {
+      snprintf(textBuf, sizeof(textBuf), "Reviewed %u %s", static_cast<unsigned>(reviewed),
+               reviewed == 1 ? "rating" : "ratings");
+    }
+    drawCenteredLineTruncated(renderer, bodyRect, UI_10_FONT_ID, y, textBuf);
+    y += subLineH + gap3;
+  }
 
   const Rect boxRect{bodyX, y, bodyWidth, boxHeight};
   renderer.drawRoundedRect(boxRect.x, boxRect.y, boxRect.width, boxRect.height, 1, 8, true);
@@ -1240,14 +1470,39 @@ void FlashcardsReviewActivity::renderSessionComplete(const Rect& safeArea, const
            static_cast<unsigned>(nextDueCount), static_cast<unsigned>(nextNewCount));
   const Rect innerBox{boxRect.x + 10, boxRect.y + 4, std::max(10, boxRect.width - 20),
                       std::max(10, boxRect.height - 8)};
-  UITheme::drawCenteredWrappedText(renderer, innerBox, UI_10_FONT_ID, textBuf, 2, true, EpdFontFamily::REGULAR,
-                                   UITheme::TextVerticalAlignment::CENTER);
+  if (nextDueCount == 0 && nextNewCount == 0 && static_cast<uint32_t>(nextScheduledDueDay) > nextSessionDay) {
+    const int twoLineTop = innerBox.y + std::max(0, (innerBox.height - subLineH * 2) / 2);
+    drawCenteredLineTruncated(renderer, innerBox, UI_10_FONT_ID, twoLineTop, textBuf);
+    snprintf(textBuf, sizeof(textBuf), "Next due: Session %u", static_cast<unsigned>(nextScheduledDueDay));
+    drawCenteredLineTruncated(renderer, innerBox, UI_10_FONT_ID, twoLineTop + subLineH, textBuf);
+  } else {
+    UITheme::drawCenteredWrappedText(renderer, innerBox, UI_10_FONT_ID, textBuf, 2, true, EpdFontFamily::REGULAR,
+                                     UITheme::TextVerticalAlignment::CENTER);
+  }
 
-  snprintf(textBuf, sizeof(textBuf), "Start Session %u Now", static_cast<unsigned>(nextSessionDay));
-  drawFocusPill(renderer, nextSessionPillRect, textBuf, UI_10_FONT_ID, true);
+  if (freeReviewCount > 0) {
+    constexpr int pillGap = 8;
+    const int halfPillWidth = std::max(24, (bodyWidth - pillGap) / 2);
+    const int totalPillsWidth = halfPillWidth * 2 + pillGap;
+    const int startX = bodyX + (bodyWidth - totalPillsWidth) / 2;
+    freeReviewPillRect = Rect{startX, pillY, halfPillWidth, pillHeight};
+    nextSessionPillRect = Rect{startX + halfPillWidth + pillGap, pillY, halfPillWidth, pillHeight};
 
-  const auto labels = mappedInput.mapLabels("Decks", "Start", "", "");
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    drawFocusPillTruncated(renderer, freeReviewPillRect, "Practice Again", UI_10_FONT_ID, focusFreeReviewOnComplete);
+    snprintf(textBuf, sizeof(textBuf), "Start Session %u", static_cast<unsigned>(nextSessionDay));
+    drawFocusPillTruncated(renderer, nextSessionPillRect, textBuf, UI_10_FONT_ID, !focusFreeReviewOnComplete);
+
+    const auto labels = mappedInput.mapLabels("Decks", focusFreeReviewOnComplete ? "Practice" : "Start", "<", ">");
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  } else {
+    freeReviewPillRect = Rect{};
+    nextSessionPillRect = Rect{bodyX, pillY, bodyWidth, pillHeight};
+    snprintf(textBuf, sizeof(textBuf), "Start Session %u Now", static_cast<unsigned>(nextSessionDay));
+    drawFocusPillTruncated(renderer, nextSessionPillRect, textBuf, UI_10_FONT_ID, true);
+
+    const auto labels = mappedInput.mapLabels("Decks", "Start", "", "");
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  }
 }
 
 void FlashcardsReviewActivity::render(RenderLock&&) {

@@ -20,9 +20,7 @@ struct DeckScanStats {
   uint32_t dueAtOrBeforeTarget = 0;
   uint32_t unseenNewTotal = 0;
   uint16_t minDueAfterTarget = 0;
-  uint16_t minReviewedDue = 0;
   bool hasDueAfterTarget = false;
-  bool hasReviewedCards = false;
 };
 
 bool containsCardHash(const std::vector<SessionSlot>& slots, uint64_t hash) noexcept {
@@ -63,11 +61,6 @@ bool scanDeckForDay(FlashcardDeckIndex& idx, const FlashcardSrsStore& store, uin
         continue;
       }
 
-      if (!out.hasReviewedCards || found->dueDay < out.minReviewedDue) {
-        out.minReviewedDue = found->dueDay;
-        out.hasReviewedCards = true;
-      }
-
       if (static_cast<uint32_t>(found->dueDay) <= targetDay) {
         ++out.dueAtOrBeforeTarget;
       } else if (!out.hasDueAfterTarget || found->dueDay < out.minDueAfterTarget) {
@@ -87,6 +80,41 @@ struct InspectWorkspace {
   std::string srsPath;
   std::string walPath;
 };
+
+struct FreeReviewScanCounts {
+  uint16_t todayStudied = 0;
+  uint16_t anyStudied = 0;
+};
+
+bool scanFreeReviewCounts(FlashcardDeckIndex& idx, const FlashcardSrsStore& store, const uint16_t today16,
+                          CardIndexRecord* batch, const size_t batchCap, FreeReviewScanCounts& out) {
+  out = FreeReviewScanCounts{};
+  const uint32_t cardCount = idx.header().cardCount;
+  for (uint32_t base = 0; base < cardCount; base += static_cast<uint32_t>(batchCap)) {
+    const size_t count = std::min<size_t>(batchCap, cardCount - base);
+    if (!idx.readIndexRecords(base, batch, count)) {
+      return false;
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+      const CardSrsRecord* found = store.findCard(batch[i].cardIdHash);
+      if (!found || found->state == static_cast<uint8_t>(CardState::New)) {
+        continue;
+      }
+
+      if (out.anyStudied < MAX_ACTIVE_QUEUE) {
+        ++out.anyStudied;
+      }
+      if (found->lastReviewDay == today16 && out.todayStudied < MAX_ACTIVE_QUEUE) {
+        ++out.todayStudied;
+        if (out.todayStudied >= MAX_ACTIVE_QUEUE) {
+          return true;
+        }
+      }
+    }
+  }
+  return true;
+}
 
 }  // namespace
 
@@ -140,22 +168,12 @@ bool FlashcardSession::inspectDeck(const char* jsonlPath, const char* cacheDir, 
   const size_t maxRev = std::min<size_t>(idxHead.maxReviews, MAX_ACTIVE_QUEUE);
   const size_t remNew =
       (out.newPerDay > srsHead.newThisSession) ? static_cast<size_t>(out.newPerDay - srsHead.newThisSession) : 0u;
-  size_t dueSlots = std::min<size_t>(stats.dueAtOrBeforeTarget, maxRev);
-  size_t newSlots = std::min<size_t>(std::min<size_t>(stats.unseenNewTotal, remNew), MAX_ACTIVE_QUEUE - dueSlots);
+  const size_t dueSlots = std::min<size_t>(stats.dueAtOrBeforeTarget, maxRev);
+  const size_t newSlots = std::min<size_t>(std::min<size_t>(stats.unseenNewTotal, remNew), MAX_ACTIVE_QUEUE - dueSlots);
 
   if (dueSlots == 0 && newSlots == 0) {
-    if (srsHead.reviewsThisSession > 0) {
-      out.sessionCompleted = true;
-      return true;
-    }
-    if (stats.hasDueAfterTarget && stats.minDueAfterTarget > out.sessionDay) {
-      out.sessionDay = stats.minDueAfterTarget;
-      if (!scanDeckForDay(ws->idx, ws->store, out.sessionDay, stats)) {
-        return false;
-      }
-      dueSlots = std::min<size_t>(stats.dueAtOrBeforeTarget, maxRev);
-      newSlots = std::min<size_t>(std::min<size_t>(stats.unseenNewTotal, out.newPerDay), MAX_ACTIVE_QUEUE - dueSlots);
-    }
+    out.sessionCompleted = true;
+    return true;
   }
 
   out.dueCount = static_cast<uint16_t>(dueSlots);
@@ -163,11 +181,8 @@ bool FlashcardSession::inspectDeck(const char* jsonlPath, const char* cacheDir, 
   return true;
 }
 
-bool FlashcardSession::rebuildQueue(uint32_t* outUnseenNew, uint16_t* outMinFutureDue, bool* outHasFutureDue) {
+bool FlashcardSession::rebuildQueue() {
   queue.clear();
-  if (outUnseenNew) *outUnseenNew = 0;
-  if (outMinFutureDue) *outMinFutureDue = 0;
-  if (outHasFutureDue) *outHasFutureDue = false;
 
   const DeckIndexHeader& idxHead = deckIndex.header();
   const SrsFileHeader& srsHead = srs.header();
@@ -202,8 +217,6 @@ bool FlashcardSession::rebuildQueue(uint32_t* outUnseenNew, uint16_t* outMinFutu
   }
 
   uint32_t unseenNewCount = 0;
-  uint16_t minFutureDue = 0;
-  bool hasFutureDue = false;
 
   // Pass 1: collect due/learning/relearning cards up to min(maxReviews, MAX_ACTIVE_QUEUE).
   for (uint32_t base = 0; base < idxHead.cardCount; base += static_cast<uint32_t>(batchCap)) {
@@ -226,9 +239,6 @@ bool FlashcardSession::rebuildQueue(uint32_t* outUnseenNew, uint16_t* outMinFutu
         if (queue.size() < maxRev && !containsCardHash(queue, rec.cardIdHash)) {
           queue.push_back(SessionSlot{ordinal, *found});
         }
-      } else if (!hasFutureDue || found->dueDay < minFutureDue) {
-        minFutureDue = found->dueDay;
-        hasFutureDue = true;
       }
     }
   }
@@ -260,9 +270,6 @@ bool FlashcardSession::rebuildQueue(uint32_t* outUnseenNew, uint16_t* outMinFutu
     }
   }
 
-  if (outUnseenNew) *outUnseenNew = unseenNewCount;
-  if (outMinFutureDue) *outMinFutureDue = minFutureDue;
-  if (outHasFutureDue) *outHasFutureDue = hasFutureDue;
   return true;
 }
 
@@ -299,27 +306,20 @@ bool FlashcardSession::open(const char* jsonlPath, const char* cacheDir) {
     return false;
   }
 
+  freeReviewsCompleted = 0;
+  freeReviewActive = false;
+  lastCompletedFree = false;
   opened = true;
 
-  uint32_t unseenNew = 0;
-  uint16_t minFutureDue = 0;
-  bool hasFutureDue = false;
-  if (!rebuildQueue(&unseenNew, &minFutureDue, &hasFutureDue)) {
+  if (!rebuildQueue()) {
     close();
     return false;
   }
 
   if (srs.header().sessionCompleted == 0 && queue.empty() && deckIndex.header().cardCount > 0) {
-    if (srs.header().reviewsThisSession > 0) {
-      if (!srs.markSessionComplete()) {
-        close();
-        return false;
-      }
-    } else if (hasFutureDue && minFutureDue > srs.header().currentSessionDay) {
-      if (!srs.advanceSession(minFutureDue) || !rebuildQueue()) {
-        close();
-        return false;
-      }
+    if (!srs.markSessionComplete()) {
+      close();
+      return false;
     }
   }
 
@@ -337,6 +337,9 @@ void FlashcardSession::close() {
   queue.clear();
   shrinkToFit(queue);
   lineBuf.reset();
+  freeReviewsCompleted = 0;
+  freeReviewActive = false;
+  lastCompletedFree = false;
   opened = false;
 }
 
@@ -349,39 +352,27 @@ bool FlashcardSession::setNewPerDayOverride(uint16_t limit) {
     return false;
   }
   if (srs.header().sessionCompleted == 0) {
-    return rebuildQueue();
+    if (!rebuildQueue()) {
+      return false;
+    }
+    if (queue.empty() && deckIndex.header().cardCount > 0) {
+      return srs.markSessionComplete();
+    }
   }
   return true;
 }
 
 uint32_t FlashcardSession::computeNextSessionDay() const {
   const uint32_t curDay = srs.header().currentSessionDay;
-  const uint32_t nextSequential =
-      (curDay < std::numeric_limits<uint32_t>::max()) ? (curDay + 1u) : std::numeric_limits<uint32_t>::max();
-  if (!opened || deckIndex.header().cardCount == 0) {
-    return nextSequential;
-  }
-
-  DeckScanStats stats{};
-  if (!scanDeckForDay(deckIndex, srs, nextSequential, stats)) {
-    return nextSequential;
-  }
-
-  const uint16_t effNew = srs.effectiveNewPerDay(deckIndex.header().newPerDay);
-  if ((stats.unseenNewTotal > 0 && effNew > 0) || stats.dueAtOrBeforeTarget > 0) {
-    return nextSequential;
-  }
-
-  if (stats.hasReviewedCards && stats.minReviewedDue > curDay) {
-    return stats.minReviewedDue;
-  }
-
-  return nextSequential;
+  return (curDay < std::numeric_limits<uint32_t>::max()) ? (curDay + 1u) : std::numeric_limits<uint32_t>::max();
 }
 
-void FlashcardSession::previewNextSession(uint16_t& outDue, uint16_t& outNew) const {
+void FlashcardSession::previewNextSession(uint16_t& outDue, uint16_t& outNew, uint16_t* outNextScheduledDay) const {
   outDue = 0;
   outNew = 0;
+  if (outNextScheduledDay != nullptr) {
+    *outNextScheduledDay = 0;
+  }
   if (!opened || deckIndex.header().cardCount == 0) {
     return;
   }
@@ -399,6 +390,32 @@ void FlashcardSession::previewNextSession(uint16_t& outDue, uint16_t& outNew) co
 
   outDue = static_cast<uint16_t>(dueSlots);
   outNew = static_cast<uint16_t>(newSlots);
+  if (outNextScheduledDay != nullptr) {
+    *outNextScheduledDay = (outDue == 0 && outNew == 0 && stats.hasDueAfterTarget) ? stats.minDueAfterTarget : 0;
+  }
+}
+
+uint16_t FlashcardSession::countFreeReviewCards() const {
+  if (!opened || deckIndex.header().cardCount == 0 || srs.header().sessionCompleted == 0) {
+    return 0;
+  }
+
+  const uint32_t cardCount = deckIndex.header().cardCount;
+  const size_t batchCap = std::min<size_t>(INDEX_SCAN_BATCH_RECORDS, cardCount);
+  auto batch = makeUniqueNoThrow<CardIndexRecord[]>(batchCap);
+  if (!batch) {
+    LOG_ERR("FCARD", "OOM allocating %u-byte free-review scan chunk",
+            static_cast<unsigned>(batchCap * sizeof(CardIndexRecord)));
+    return 0;
+  }
+
+  const uint16_t today16 = static_cast<uint16_t>(std::min<uint32_t>(srs.header().currentSessionDay, 65535u));
+  FreeReviewScanCounts counts{};
+  if (!scanFreeReviewCounts(deckIndex, srs, today16, batch.get(), batchCap, counts)) {
+    return 0;
+  }
+
+  return counts.todayStudied > 0 ? counts.todayStudied : counts.anyStudied;
 }
 
 bool FlashcardSession::currentCard(FlashcardItem& outCard, CardSrsRecord& outSrs, IntervalPreview& outPreview) {
@@ -412,13 +429,18 @@ bool FlashcardSession::currentCard(FlashcardItem& outCard, CardSrsRecord& outSrs
   }
 
   outSrs = front.srs;
+  if (freeReviewActive) {
+    outPreview = IntervalPreview{0, 0, 0};
+    return true;
+  }
+
   const uint16_t today = static_cast<uint16_t>(std::min<uint32_t>(srs.header().currentSessionDay, 65535u));
   outPreview = FlashcardScheduler::previewIntervals(front.srs, today);
   return true;
 }
 
 bool FlashcardSession::submitRating(Rating rating) {
-  if (!opened || queue.empty() || srs.header().sessionCompleted != 0) {
+  if (!opened || freeReviewActive || queue.empty() || srs.header().sessionCompleted != 0) {
     LOG_ERR("FCARD", "Cannot submit rating: no active session card");
     return false;
   }
@@ -448,18 +470,121 @@ bool FlashcardSession::submitRating(Rating rating) {
   return true;
 }
 
+bool FlashcardSession::startFreeReview() {
+  if (!opened || deckIndex.header().cardCount == 0 || srs.header().sessionCompleted == 0) {
+    LOG_ERR("FCARD", "Cannot start free review: session not completed");
+    return false;
+  }
+
+  const uint32_t cardCount = deckIndex.header().cardCount;
+  const size_t batchCap = std::min<size_t>(INDEX_SCAN_BATCH_RECORDS, cardCount);
+  auto batch = makeUniqueNoThrow<CardIndexRecord[]>(batchCap);
+  if (!batch) {
+    LOG_ERR("FCARD", "OOM allocating %u-byte free-review build chunk",
+            static_cast<unsigned>(batchCap * sizeof(CardIndexRecord)));
+    return false;
+  }
+
+  const uint16_t today16 = static_cast<uint16_t>(std::min<uint32_t>(srs.header().currentSessionDay, 65535u));
+  FreeReviewScanCounts counts{};
+  if (!scanFreeReviewCounts(deckIndex, srs, today16, batch.get(), batchCap, counts)) {
+    return false;
+  }
+
+  const bool onlyToday = (counts.todayStudied > 0);
+  const size_t reserveCap = onlyToday ? counts.todayStudied : counts.anyStudied;
+  if (reserveCap == 0) {
+    return false;
+  }
+
+  queue.clear();
+  if (reserveCap > queue.capacity()) {
+    const size_t queueBytes = reserveCap * sizeof(SessionSlot);
+    auto probe = makeUniqueNoThrow<uint8_t[]>(queueBytes);
+    if (!probe) {
+      LOG_ERR("FCARD", "OOM reserving %u free-review queue slots (%u B)", static_cast<unsigned>(reserveCap),
+              static_cast<unsigned>(queueBytes));
+      return false;
+    }
+    probe.reset();
+    queue.reserve(reserveCap);
+  }
+
+  for (uint32_t base = 0; base < cardCount && queue.size() < reserveCap; base += static_cast<uint32_t>(batchCap)) {
+    const size_t count = std::min<size_t>(batchCap, cardCount - base);
+    if (!deckIndex.readIndexRecords(base, batch.get(), count)) {
+      queue.clear();
+      return false;
+    }
+
+    for (size_t i = 0; i < count && queue.size() < reserveCap; ++i) {
+      const CardSrsRecord* found = srs.findCard(batch[i].cardIdHash);
+      if (!found || found->state == static_cast<uint8_t>(CardState::New)) {
+        continue;
+      }
+      if (onlyToday && found->lastReviewDay != today16) {
+        continue;
+      }
+      queue.push_back(SessionSlot{base + static_cast<uint32_t>(i), *found});
+    }
+  }
+
+  if (queue.empty()) {
+    return false;
+  }
+
+  freeReviewActive = true;
+  freeReviewsCompleted = 0;
+  lastCompletedFree = false;
+  return true;
+}
+
+bool FlashcardSession::submitFreeReview(const bool repeatAgain) {
+  if (!opened || !freeReviewActive || queue.empty()) {
+    LOG_ERR("FCARD", "Cannot submit free review: no active free-review card");
+    return false;
+  }
+
+  const SessionSlot current = queue.front();
+  queue.erase(queue.begin());
+  ++freeReviewsCompleted;
+
+  if (repeatAgain) {
+    const size_t insertOffset = std::min<size_t>(queue.size(), AGAIN_REQUEUE_AHEAD);
+    queue.insert(queue.begin() + static_cast<std::ptrdiff_t>(insertOffset), current);
+  }
+
+  if (queue.empty()) {
+    freeReviewActive = false;
+    lastCompletedFree = true;
+  }
+
+  return true;
+}
+
 bool FlashcardSession::startNextSession() {
   if (!opened) {
     LOG_ERR("FCARD", "Cannot start next session: session not open");
     return false;
   }
 
+  freeReviewsCompleted = 0;
+  freeReviewActive = false;
+  lastCompletedFree = false;
+
   const uint32_t nextDay = computeNextSessionDay();
   if (!srs.advanceSession(nextDay)) {
     return false;
   }
-
-  return rebuildQueue();
+  if (!rebuildQueue()) {
+    return false;
+  }
+  if (queue.empty() && deckIndex.header().cardCount > 0) {
+    if (!srs.markSessionComplete()) {
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace flashcards

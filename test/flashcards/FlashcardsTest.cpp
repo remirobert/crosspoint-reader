@@ -536,7 +536,7 @@ TEST_F(FlashcardsStorageTest, WalReplayOnPowerCutAndTornWalRecovery) {
   }
 }
 
-TEST_F(FlashcardsStorageTest, EmptyDayFastForwardNewPerDayOverrideAndResetDeck) {
+TEST_F(FlashcardsStorageTest, StrictSequentialProgressionNewPerDayOverrideAndResetDeck) {
   const std::string deckPath = "/flashcards/mastered.jsonl";
   const std::string jsonl = R"({"_meta":true,"title":"Short Deck","newPerDay":20,"maxReviews":100})"
                             "\n"
@@ -571,28 +571,60 @@ TEST_F(FlashcardsStorageTest, EmptyDayFastForwardNewPerDayOverrideAndResetDeck) 
     ASSERT_TRUE(s1.submitRating(Rating::Easy));  // dueDay = 17
     EXPECT_TRUE(s1.isSessionComplete());
 
-    // 1 unseen New card (m3) still remains, so next session day is 2 (no fast-forward yet).
+    // 1 unseen New card (m3) still remains, so next session day is 2 with 1 new card and nextScheduledDay == 0.
     EXPECT_EQ(s1.computeNextSessionDay(), 2u);
+    uint16_t duePreview = 99;
+    uint16_t newPreview = 99;
+    uint16_t nextSched = 99;
+    s1.previewNextSession(duePreview, newPreview, &nextSched);
+    EXPECT_EQ(duePreview, 0u);
+    EXPECT_EQ(newPreview, 1u);
+    EXPECT_EQ(nextSched, 0u);
+
     ASSERT_TRUE(s1.startNextSession());
     EXPECT_EQ(s1.sessionDay(), 2u);
+    EXPECT_FALSE(s1.isSessionComplete());
     EXPECT_EQ(s1.remainingCount(), 1u);
 
-    // Rate m3 Easy on day 2 -> dueDay = 18. Now 0 unseen New cards remain; earliest due is day 17!
-    ASSERT_TRUE(s1.submitRating(Rating::Easy));
+    // Rate m3 Good on day 2 -> dueDay = 5. Now 0 unseen New cards remain; earliest due is day 5.
+    ASSERT_TRUE(s1.submitRating(Rating::Good));
     EXPECT_TRUE(s1.isSessionComplete());
-    EXPECT_EQ(s1.computeNextSessionDay(), 17u);
 
-    uint16_t duePreview = 0;
-    uint16_t newPreview = 0;
-    s1.previewNextSession(duePreview, newPreview);
-    EXPECT_EQ(duePreview, 2u);
+    // Strict +1 progression: computeNextSessionDay() returns 3 (never fast-forwards to 5).
+    EXPECT_EQ(s1.computeNextSessionDay(), 3u);
+    s1.previewNextSession(duePreview, newPreview, &nextSched);
+    EXPECT_EQ(duePreview, 0u);
     EXPECT_EQ(newPreview, 0u);
+    EXPECT_EQ(nextSched, 5u);
 
-    // Advancing jumps directly from day 2 to day 17, skipping empty days 3..16!
+    // Stepping S2 -> S3 enters empty Session 3 marked complete immediately with 0 reviews.
     ASSERT_TRUE(s1.startNextSession());
-    EXPECT_EQ(s1.sessionDay(), 17u);
+    EXPECT_EQ(s1.sessionDay(), 3u);
+    EXPECT_TRUE(s1.isSessionComplete());
+    EXPECT_EQ(s1.reviewsThisSession(), 0u);
+    EXPECT_EQ(s1.remainingCount(), 0u);
+    EXPECT_EQ(s1.computeNextSessionDay(), 4u);
+    s1.previewNextSession(duePreview, newPreview, &nextSched);
+    EXPECT_EQ(duePreview, 0u);
+    EXPECT_EQ(newPreview, 0u);
+    EXPECT_EQ(nextSched, 5u);
+
+    // Stepping S3 -> S4 enters empty Session 4; Up Next (Session 5) now previews 1 due, 0 new (nextSched == 0).
+    ASSERT_TRUE(s1.startNextSession());
+    EXPECT_EQ(s1.sessionDay(), 4u);
+    EXPECT_TRUE(s1.isSessionComplete());
+    EXPECT_EQ(s1.reviewsThisSession(), 0u);
+    EXPECT_EQ(s1.computeNextSessionDay(), 5u);
+    s1.previewNextSession(duePreview, newPreview, &nextSched);
+    EXPECT_EQ(duePreview, 1u);
+    EXPECT_EQ(newPreview, 0u);
+    EXPECT_EQ(nextSched, 0u);
+
+    // Stepping S4 -> S5 makes m3 due on Session 5.
+    ASSERT_TRUE(s1.startNextSession());
+    EXPECT_EQ(s1.sessionDay(), 5u);
     EXPECT_FALSE(s1.isSessionComplete());
-    EXPECT_EQ(s1.remainingCount(), 2u);
+    EXPECT_EQ(s1.remainingCount(), 1u);
     s1.close();
   }
 
@@ -777,6 +809,366 @@ TEST_F(FlashcardsStorageTest, OomProbeFailurePathsFailSoft) {
   ASSERT_TRUE(healthy.open(deckPath.c_str(), "/.crosspoint/flashcards"));
   EXPECT_EQ(healthy.remainingCount(), 2u);
   healthy.close();
+}
+
+TEST_F(FlashcardsStorageTest, FreeReviewDrillingPreservesSrsAndWalState) {
+  const std::string deckPath = "/flashcards/freerev.jsonl";
+  std::string jsonl = R"({"_meta":true,"title":"Practice Deck","newPerDay":8,"maxReviews":100})"
+                      "\n";
+  for (int i = 0; i < 12; ++i) {
+    jsonl += "{\"id\":\"f" + std::to_string(i) + "\",\"front\":\"Front" + std::to_string(i) + "\",\"back\":\"Back" +
+             std::to_string(i) + "\"}\n";
+  }
+  flashcards_fs::setFile(deckPath, jsonl);
+
+  std::string idxPath;
+  std::string srsPath;
+  std::string walPath;
+  FlashcardSrsStore::buildPaths("/.crosspoint/flashcards", deckPath, idxPath, srsPath, walPath);
+
+  FlashcardSession session;
+  ASSERT_TRUE(session.open(deckPath.c_str(), "/.crosspoint/flashcards"));
+  ASSERT_EQ(session.remainingCount(), 8u);
+  EXPECT_FALSE(session.isFreeReview());
+  EXPECT_FALSE(session.lastPassWasFreeReview());
+  EXPECT_EQ(session.countFreeReviewCards(), 0u);
+  EXPECT_FALSE(session.startFreeReview());
+  EXPECT_FALSE(session.submitFreeReview(false));
+
+  // Complete Session 1 with varied ratings across f0..f7 (leaving f8..f11 unseen New).
+  ASSERT_TRUE(session.submitRating(Rating::Again));  // f0 -> Learning, requeued 6 ahead
+  ASSERT_TRUE(session.submitRating(Rating::Hard));   // f1 -> dueDay 2
+  ASSERT_TRUE(session.submitRating(Rating::Good));   // f2 -> dueDay 4
+  ASSERT_TRUE(session.submitRating(Rating::Easy));   // f3 -> dueDay 17
+  ASSERT_TRUE(session.submitRating(Rating::Good));   // f4 -> dueDay 4
+  ASSERT_TRUE(session.submitRating(Rating::Hard));   // f5 -> dueDay 2
+  ASSERT_TRUE(session.submitRating(Rating::Easy));   // f6 -> dueDay 17
+  ASSERT_TRUE(session.submitRating(Rating::Good));   // f0 (requeued) -> Review
+  ASSERT_TRUE(session.submitRating(Rating::Good));   // f7 -> dueDay 4
+
+  ASSERT_TRUE(session.isSessionComplete());
+  EXPECT_FALSE(session.isFreeReview());
+  EXPECT_FALSE(session.lastPassWasFreeReview());
+  EXPECT_EQ(session.sessionDay(), 1u);
+  EXPECT_EQ(session.reviewsThisSession(), 9u);
+  EXPECT_EQ(session.countFreeReviewCards(), 8u);
+
+  // Snapshot exact SRS records, WAL bytes, and write counters before Free Review begins.
+  const std::vector<CardSrsRecord> recordsBefore = session.srsStore().records();
+  ASSERT_EQ(recordsBefore.size(), 8u);
+  const std::vector<uint8_t> srsBytesBefore =
+      Storage.exists(srsPath.c_str()) ? flashcards_fs::getFileBytes(srsPath) : std::vector<uint8_t>{};
+  const std::vector<uint8_t> walBytesBefore = flashcards_fs::getFileBytes(walPath);
+  const unsigned srsWritesBefore = flashcards_fs::writeCount(srsPath);
+  const unsigned walWritesBefore = flashcards_fs::writeCount(walPath);
+  uint16_t dueBefore = 0;
+  uint16_t newBefore = 0;
+  session.previewNextSession(dueBefore, newBefore);
+
+  // Start Free Review over the 8 Session 1 cards.
+  ASSERT_TRUE(session.startFreeReview());
+  EXPECT_TRUE(session.isFreeReview());
+  EXPECT_FALSE(session.isSessionComplete());
+  EXPECT_FALSE(session.lastPassWasFreeReview());
+  EXPECT_EQ(session.freeReviewRatingsCount(), 0u);
+  EXPECT_EQ(session.remainingCount(), 8u);
+
+  // Normal FSRS ratings are rejected during Free Review.
+  EXPECT_FALSE(session.submitRating(Rating::Good));
+  EXPECT_FALSE(session.submitRating(Rating::Again));
+
+  FlashcardItem card;
+  CardSrsRecord srs;
+  IntervalPreview preview{99, 99, 99};
+  ASSERT_TRUE(session.currentCard(card, srs, preview));
+  EXPECT_EQ(card.front, "Front0");
+  EXPECT_EQ(preview.hardDays, 0u);
+  EXPECT_EQ(preview.goodDays, 0u);
+  EXPECT_EQ(preview.easyDays, 0u);
+
+  // "Again" on Front0 re-queues it 6 cards ahead (after Front1..Front6) in RAM only.
+  ASSERT_TRUE(session.submitFreeReview(true));
+  EXPECT_EQ(session.remainingCount(), 8u);
+  EXPECT_EQ(session.freeReviewRatingsCount(), 1u);
+
+  for (int expected = 1; expected <= 6; ++expected) {
+    ASSERT_TRUE(session.currentCard(card, srs, preview));
+    EXPECT_EQ(card.front, "Front" + std::to_string(expected));
+    ASSERT_TRUE(session.submitFreeReview(false));
+  }
+
+  // Front0 reappears at slot 6; clear it with "Got It".
+  ASSERT_TRUE(session.currentCard(card, srs, preview));
+  EXPECT_EQ(card.front, "Front0");
+  ASSERT_TRUE(session.submitFreeReview(false));
+  EXPECT_EQ(session.remainingCount(), 1u);
+
+  // Last remaining card Front7: "Again" keeps it at the front without completing the pass.
+  ASSERT_TRUE(session.currentCard(card, srs, preview));
+  EXPECT_EQ(card.front, "Front7");
+  ASSERT_TRUE(session.submitFreeReview(true));
+  EXPECT_EQ(session.remainingCount(), 1u);
+  EXPECT_TRUE(session.isFreeReview());
+  EXPECT_FALSE(session.isSessionComplete());
+
+  ASSERT_TRUE(session.currentCard(card, srs, preview));
+  EXPECT_EQ(card.front, "Front7");
+  ASSERT_TRUE(session.submitFreeReview(false));
+
+  // Free Review pass complete: back at SessionComplete boundary with zero SRS/WAL mutations.
+  EXPECT_EQ(session.remainingCount(), 0u);
+  EXPECT_FALSE(session.isFreeReview());
+  EXPECT_TRUE(session.isSessionComplete());
+  EXPECT_TRUE(session.lastPassWasFreeReview());
+  EXPECT_EQ(session.freeReviewRatingsCount(), 10u);
+
+  EXPECT_EQ(session.sessionDay(), 1u);
+  EXPECT_EQ(session.reviewsThisSession(), 9u);
+  EXPECT_EQ(flashcards_fs::writeCount(srsPath), srsWritesBefore);
+  EXPECT_EQ(flashcards_fs::writeCount(walPath), walWritesBefore);
+  EXPECT_EQ(Storage.exists(srsPath.c_str()) ? flashcards_fs::getFileBytes(srsPath) : std::vector<uint8_t>{},
+            srsBytesBefore);
+  EXPECT_EQ(flashcards_fs::getFileBytes(walPath), walBytesBefore);
+
+  const std::vector<CardSrsRecord>& recordsAfter = session.srsStore().records();
+  ASSERT_EQ(recordsAfter.size(), recordsBefore.size());
+  for (size_t i = 0; i < recordsBefore.size(); ++i) {
+    EXPECT_EQ(recordsAfter[i].cardIdHash, recordsBefore[i].cardIdHash);
+    EXPECT_FLOAT_EQ(recordsAfter[i].stability, recordsBefore[i].stability);
+    EXPECT_EQ(recordsAfter[i].difficultyPermille, recordsBefore[i].difficultyPermille);
+    EXPECT_EQ(recordsAfter[i].dueDay, recordsBefore[i].dueDay);
+    EXPECT_EQ(recordsAfter[i].lastReviewDay, recordsBefore[i].lastReviewDay);
+    EXPECT_EQ(recordsAfter[i].state, recordsBefore[i].state);
+    EXPECT_EQ(recordsAfter[i].lapses, recordsBefore[i].lapses);
+  }
+
+  uint16_t dueAfter = 0;
+  uint16_t newAfter = 0;
+  session.previewNextSession(dueAfter, newAfter);
+  EXPECT_EQ(dueAfter, dueBefore);
+  EXPECT_EQ(newAfter, newBefore);
+  session.close();
+
+  // Re-opening from disk still finds the 8 Session 1 cards via lastReviewDay == 1, then advances cleanly to Session 2.
+  FlashcardSession reopened;
+  ASSERT_TRUE(reopened.open(deckPath.c_str(), "/.crosspoint/flashcards"));
+  EXPECT_TRUE(reopened.isSessionComplete());
+  EXPECT_FALSE(reopened.lastPassWasFreeReview());
+  EXPECT_EQ(reopened.countFreeReviewCards(), 8u);
+  ASSERT_TRUE(reopened.startFreeReview());
+  EXPECT_EQ(reopened.remainingCount(), 8u);
+
+  ASSERT_TRUE(reopened.startNextSession());
+  EXPECT_FALSE(reopened.isFreeReview());
+  EXPECT_FALSE(reopened.lastPassWasFreeReview());
+  EXPECT_EQ(reopened.freeReviewRatingsCount(), 0u);
+  EXPECT_EQ(reopened.sessionDay(), 2u);
+  EXPECT_FALSE(reopened.isSessionComplete());
+  EXPECT_EQ(reopened.remainingCount(), static_cast<size_t>(dueBefore + newBefore));
+  reopened.close();
+}
+
+TEST_F(FlashcardsStorageTest, FreeReviewFallbackPassAndOomFailSoft) {
+  const std::string deckPath = "/flashcards/fallback.jsonl";
+  const std::string jsonl = R"({"_meta":true,"title":"Fallback Deck","newPerDay":2,"maxReviews":50})"
+                            "\n"
+                            R"({"id":"a","front":"QA","back":"AA"})"
+                            "\n"
+                            R"({"id":"b","front":"QB","back":"AB"})"
+                            "\n"
+                            R"({"id":"c","front":"QC","back":"AC"})"
+                            "\n";
+  flashcards_fs::setFile(deckPath, jsonl);
+
+  std::string idxPath;
+  std::string srsPath;
+  std::string walPath;
+  FlashcardSrsStore::buildPaths("/.crosspoint/flashcards", deckPath, idxPath, srsPath, walPath);
+
+  // Study 2 cards on Day 1, then write a completed Day 3 header where no card has lastReviewDay == 3.
+  {
+    FlashcardSession s1;
+    ASSERT_TRUE(s1.open(deckPath.c_str(), "/.crosspoint/flashcards"));
+    ASSERT_TRUE(s1.submitRating(Rating::Easy));
+    ASSERT_TRUE(s1.submitRating(Rating::Easy));
+    ASSERT_TRUE(s1.isSessionComplete());
+    s1.close();
+
+    FlashcardSrsStore store;
+    ASSERT_TRUE(store.load(srsPath.c_str(), walPath.c_str()));
+    ASSERT_TRUE(store.advanceSession(3));
+    ASSERT_TRUE(store.markSessionComplete());
+    ASSERT_TRUE(store.compact());
+  }
+
+  FlashcardSession fallbackSession;
+  ASSERT_TRUE(fallbackSession.open(deckPath.c_str(), "/.crosspoint/flashcards"));
+  ASSERT_TRUE(fallbackSession.isSessionComplete());
+  EXPECT_EQ(fallbackSession.sessionDay(), 3u);
+  // Primary pass (lastReviewDay == 3) finds 0; fallback pass finds the 2 studied cards (skipping unseen "c").
+  EXPECT_EQ(fallbackSession.countFreeReviewCards(), 2u);
+
+  // OOM during countFreeReviewCards and startFreeReview fails soft without entering Free Review.
+  flashcards_test_mem::failAllocCountdown = 0;
+  EXPECT_EQ(fallbackSession.countFreeReviewCards(), 0u);
+  flashcards_test_mem::failAllocCountdown = 0;
+  EXPECT_FALSE(fallbackSession.startFreeReview());
+  flashcards_test_mem::failAllocCountdown = -1;
+  EXPECT_FALSE(fallbackSession.isFreeReview());
+  EXPECT_TRUE(fallbackSession.isSessionComplete());
+
+  ASSERT_TRUE(fallbackSession.startFreeReview());
+  EXPECT_TRUE(fallbackSession.isFreeReview());
+  EXPECT_EQ(fallbackSession.remainingCount(), 2u);
+  fallbackSession.close();
+}
+
+TEST_F(FlashcardsStorageTest, StrictSequentialEmptySessionsFreeReviewAndElapsedDays) {
+  const std::string deckPath = "/flashcards/seq5.jsonl";
+  const std::string jsonl = R"({"_meta":true,"title":"Seq Deck","newPerDay":20,"maxReviews":100})"
+                            "\n"
+                            R"({"id":"s1","front":"CardOne","back":"AnsOne"})"
+                            "\n"
+                            R"({"id":"s2","front":"CardTwo","back":"AnsTwo"})"
+                            "\n";
+  flashcards_fs::setFile(deckPath, jsonl);
+
+  std::string idxPath;
+  std::string srsPath;
+  std::string walPath;
+  FlashcardSrsStore::buildPaths("/.crosspoint/flashcards", deckPath, idxPath, srsPath, walPath);
+
+  // Seed Session 1 completion where all cards in S1 were reviewed on day 1 and scheduled for S5.
+  CardSrsRecord rec1{};
+  rec1.cardIdHash = fnv1a64("s1");
+  rec1.stability = 4.0f;
+  rec1.difficultyPermille = 5200;
+  rec1.dueDay = 5;
+  rec1.lastReviewDay = 1;
+  rec1.state = static_cast<uint8_t>(CardState::Review);
+
+  CardSrsRecord rec2 = rec1;
+  rec2.cardIdHash = fnv1a64("s2");
+
+  {
+    ASSERT_TRUE(FlashcardDeckIndex::ensureDir("/.crosspoint/flashcards"));
+    FlashcardSrsStore store;
+    ASSERT_TRUE(store.load(srsPath.c_str(), walPath.c_str()));
+    ASSERT_TRUE(store.recordRating(rec1, true));
+    ASSERT_TRUE(store.recordRating(rec2, true));
+    ASSERT_TRUE(store.markSessionComplete());
+  }
+
+  FlashcardSession session;
+  ASSERT_TRUE(session.open(deckPath.c_str(), "/.crosspoint/flashcards"));
+  ASSERT_TRUE(session.isSessionComplete());
+  EXPECT_EQ(session.sessionDay(), 1u);
+  EXPECT_EQ(session.reviewsThisSession(), 2u);
+
+  // From S1: next session is S2 (strict +1), preview reports 0 due, 0 new, nextScheduledDay == 5.
+  EXPECT_EQ(session.computeNextSessionDay(), 2u);
+  uint16_t nextDue = 99;
+  uint16_t nextNew = 99;
+  uint16_t nextScheduled = 0;
+  session.previewNextSession(nextDue, nextNew, &nextScheduled);
+  EXPECT_EQ(nextDue, 0u);
+  EXPECT_EQ(nextNew, 0u);
+  EXPECT_EQ(nextScheduled, 5u);
+
+  // Step S1 -> S2: empty session enters SessionComplete immediately with 0 reviews.
+  ASSERT_TRUE(session.startNextSession());
+  EXPECT_EQ(session.sessionDay(), 2u);
+  EXPECT_TRUE(session.isSessionComplete());
+  EXPECT_EQ(session.reviewsThisSession(), 0u);
+  EXPECT_EQ(session.remainingCount(), 0u);
+  EXPECT_EQ(session.computeNextSessionDay(), 3u);
+  session.previewNextSession(nextDue, nextNew, &nextScheduled);
+  EXPECT_EQ(nextDue, 0u);
+  EXPECT_EQ(nextNew, 0u);
+  EXPECT_EQ(nextScheduled, 5u);
+
+  // Practice Again on empty S2 loads the 2 studied cards via fallback without touching SRS or WAL.
+  const std::vector<uint8_t> srsBeforeFree = flashcards_fs::getFileBytes(srsPath);
+  const unsigned srsWritesBeforeFree = flashcards_fs::writeCount(srsPath);
+  const unsigned walWritesBeforeFree = flashcards_fs::writeCount(walPath);
+  EXPECT_EQ(session.countFreeReviewCards(), 2u);
+  ASSERT_TRUE(session.startFreeReview());
+  EXPECT_TRUE(session.isFreeReview());
+  EXPECT_EQ(session.remainingCount(), 2u);
+  ASSERT_TRUE(session.submitFreeReview(false));
+  ASSERT_TRUE(session.submitFreeReview(false));
+  EXPECT_FALSE(session.isFreeReview());
+  EXPECT_TRUE(session.isSessionComplete());
+  EXPECT_TRUE(session.lastPassWasFreeReview());
+  EXPECT_EQ(session.sessionDay(), 2u);
+  EXPECT_EQ(session.reviewsThisSession(), 0u);
+  EXPECT_EQ(flashcards_fs::writeCount(srsPath), srsWritesBeforeFree);
+  EXPECT_EQ(flashcards_fs::writeCount(walPath), walWritesBeforeFree);
+  EXPECT_EQ(flashcards_fs::getFileBytes(srsPath), srsBeforeFree);
+  session.close();
+
+  // Verify inspectDeck() and open() on an uncompleted empty session (e.g. S3 before markSessionComplete) do not
+  // fast-forward: both keep sessionDay == 3 and mark sessionCompleted == true.
+  {
+    FlashcardSrsStore store;
+    ASSERT_TRUE(store.load(srsPath.c_str(), walPath.c_str()));
+    ASSERT_TRUE(store.advanceSession(3));
+    ASSERT_TRUE(store.compact());
+  }
+  FlashcardSession::DeckSummary sumS3{};
+  ASSERT_TRUE(FlashcardSession::inspectDeck(deckPath.c_str(), "/.crosspoint/flashcards", sumS3));
+  EXPECT_EQ(sumS3.sessionDay, 3u);
+  EXPECT_EQ(sumS3.dueCount, 0u);
+  EXPECT_EQ(sumS3.newCount, 0u);
+  EXPECT_TRUE(sumS3.sessionCompleted);
+
+  ASSERT_TRUE(session.open(deckPath.c_str(), "/.crosspoint/flashcards"));
+  EXPECT_EQ(session.sessionDay(), 3u);
+  EXPECT_TRUE(session.isSessionComplete());
+  EXPECT_EQ(session.reviewsThisSession(), 0u);
+  session.previewNextSession(nextDue, nextNew, &nextScheduled);
+  EXPECT_EQ(nextDue, 0u);
+  EXPECT_EQ(nextNew, 0u);
+  EXPECT_EQ(nextScheduled, 5u);
+
+  // Step S3 -> S4: S4 is still empty, while Up Next (S5) previews 2 due, 0 new (nextScheduled == 0).
+  ASSERT_TRUE(session.startNextSession());
+  EXPECT_EQ(session.sessionDay(), 4u);
+  EXPECT_TRUE(session.isSessionComplete());
+  EXPECT_EQ(session.reviewsThisSession(), 0u);
+  session.previewNextSession(nextDue, nextNew, &nextScheduled);
+  EXPECT_EQ(nextDue, 2u);
+  EXPECT_EQ(nextNew, 0u);
+  EXPECT_EQ(nextScheduled, 0u);
+
+  // Step S4 -> S5: cards are now due on S5 with truthful elapsedDays == 4 (today=5 - lastReviewDay=1).
+  ASSERT_TRUE(session.startNextSession());
+  EXPECT_EQ(session.sessionDay(), 5u);
+  EXPECT_FALSE(session.isSessionComplete());
+  EXPECT_EQ(session.remainingCount(), 2u);
+
+  FlashcardItem activeCard;
+  CardSrsRecord activeSrs;
+  IntervalPreview activePreview{};
+  ASSERT_TRUE(session.currentCard(activeCard, activeSrs, activePreview));
+  const IntervalPreview expectedPreview = FlashcardScheduler::previewIntervals(rec1, 5);
+  EXPECT_EQ(activePreview.hardDays, expectedPreview.hardDays);
+  EXPECT_EQ(activePreview.goodDays, expectedPreview.goodDays);
+  EXPECT_EQ(activePreview.easyDays, expectedPreview.easyDays);
+
+  const CardSrsRecord expectedRated = FlashcardScheduler::reviewCard(rec1, Rating::Good, 5);
+  ASSERT_TRUE(session.submitRating(Rating::Good));
+  ASSERT_TRUE(session.submitRating(Rating::Good));
+  EXPECT_TRUE(session.isSessionComplete());
+  EXPECT_EQ(session.reviewsThisSession(), 2u);
+
+  const CardSrsRecord* persisted1 = session.srsStore().findCard(rec1.cardIdHash);
+  ASSERT_NE(persisted1, nullptr);
+  EXPECT_FLOAT_EQ(persisted1->stability, expectedRated.stability);
+  EXPECT_EQ(persisted1->difficultyPermille, expectedRated.difficultyPermille);
+  EXPECT_EQ(persisted1->dueDay, expectedRated.dueDay);
+  EXPECT_EQ(persisted1->lastReviewDay, 5u);
+  session.close();
 }
 
 }  // namespace

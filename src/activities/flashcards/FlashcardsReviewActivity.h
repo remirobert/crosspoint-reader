@@ -49,6 +49,7 @@ class FlashcardsReviewActivity final : public Activity {
   };
 
   bool loadActiveCardState();
+  void populateSessionCompleteMetrics();
   void enterSessionCompleteState();
   void clearSleepResumeState();
   void saveSleepResumeStateIfReady();
@@ -56,6 +57,9 @@ class FlashcardsReviewActivity final : public Activity {
   void flipToBack();
   void stepFocusedRating(int delta);
   void submitActiveRating(flashcards::Rating rating);
+  void submitFreeReviewChoice(bool repeatAgain);
+  void stepCompleteFocus(int delta);
+  void beginFreeReview();
   void advanceToNextSession();
   bool stepAnswerPage(int delta);
   void ensureCardLayout(const Rect& promptBandRect, int answerWidth, int answerAvailHeight,
@@ -91,6 +95,8 @@ class FlashcardsReviewActivity final : public Activity {
 
   uint16_t nextDueCount = 0;
   uint16_t nextNewCount = 0;
+  uint16_t nextScheduledDueDay = 0;
+  uint16_t freeReviewCount = 0;
   uint32_t nextSessionDay = 1;
 
   int cardsUntilFullRefresh = 0;
@@ -99,6 +105,8 @@ class FlashcardsReviewActivity final : public Activity {
   bool suppressBackRelease = false;
   bool loadFailed = false;
   bool reviewStateSaved = false;
+  bool freeReviewFocusGotIt = true;
+  bool focusFreeReviewOnComplete = false;
   std::atomic<bool> firstReviewFrameRendered{false};
 
   ButtonNavigator buttonNavigator;
@@ -106,5 +114,6 @@ class FlashcardsReviewActivity final : public Activity {
   Rect showAnswerPillRect;
   Rect cardTapBodyRect;
   Rect ratingPillRects[4];
+  Rect freeReviewPillRect;
   Rect nextSessionPillRect;
 };
