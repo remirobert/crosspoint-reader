@@ -38,21 +38,17 @@ void CrossPointState::setSleepOverlayLCG(uint32_t seed, uint32_t state, uint16_t
 
 void CrossPointState::toJson(JsonDocument& doc) const {
   doc["openEpubPath"] = openEpubPath;
-  doc["openFlashcardsPath"] = openFlashcardsPath;
   doc["sleepLcgCount"] = sleepLcgCount;
   doc["sleepLcgState"] = sleepLcgState;
   doc["sleepOverlayLcgCount"] = sleepOverlayLcgCount;
   doc["sleepOverlayLcgState"] = sleepOverlayLcgState;
   doc["readerActivityLoadCount"] = readerActivityLoadCount;
-  doc["flashcardsActivityLoadCount"] = flashcardsActivityLoadCount;
   doc["lastSleepFromReader"] = lastSleepFromReader;
-  doc["lastSleepFromFlashcards"] = lastSleepFromFlashcards;
   doc["showBootScreen"] = showBootScreen;
 }
 
 bool CrossPointState::fromJson(JsonVariantConst doc) {
   openEpubPath = doc["openEpubPath"] | "";
-  openFlashcardsPath = doc["openFlashcardsPath"] | "";
 
   sleepLcgCount = doc["sleepLcgCount"] | static_cast<uint32_t>(0);
   sleepLcgState = doc["sleepLcgState"] | static_cast<uint32_t>(0);
@@ -61,9 +57,7 @@ bool CrossPointState::fromJson(JsonVariantConst doc) {
   sleepOverlayLcgState = doc["sleepOverlayLcgState"] | static_cast<uint32_t>(0);
 
   readerActivityLoadCount = doc["readerActivityLoadCount"] | static_cast<uint8_t>(0);
-  flashcardsActivityLoadCount = doc["flashcardsActivityLoadCount"] | static_cast<uint8_t>(0);
   lastSleepFromReader = doc["lastSleepFromReader"] | false;
-  lastSleepFromFlashcards = doc["lastSleepFromFlashcards"] | false;
   showBootScreen = doc["showBootScreen"] | true;
   return true;
 }

@@ -1,9 +1,11 @@
 #include "FlashcardsDeckListActivity.h"
 
 #include <FlashcardDeckIndex.h>
-#include <FlashcardSrsStore.h>
+#include <FontCacheManager.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
+#include <HalDisplay.h>
+#include <HalPowerManager.h>
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
@@ -12,19 +14,20 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
-#include <limits>
 #include <string_view>
 #include <utility>
 
-#include "CrossPointState.h"
+#include "CrossPointSettings.h"
 #include "FlashcardsReviewActivity.h"
+#include "HapticFeedback.h"
 #include "MappedInputManager.h"
+#include "SdCardFontSystem.h"
 #include "activities/ActivityManager.h"
-#include "activities/util/ConfirmationActivity.h"
+#include "activities/reader/ReaderUtils.h"
+#include "components/HeaderBackTapTarget.h"
+#include "components/UIScale.h"
 #include "components/UITheme.h"
-#include "components/UiAppHelpers.h"
-
-namespace fui = freeink::ui;
+#include "fontIds.h"
 
 namespace {
 
@@ -36,12 +39,8 @@ constexpr const char* HEADER_TITLE = "Flashcards";
 constexpr const char* EMPTY_HEADING = "No decks found.";
 constexpr const char* EMPTY_SUBTITLE = "Copy .jsonl files to /flashcards on the SD card.";
 
-struct SrsEditWorkspace {
-  flashcards::FlashcardSrsStore store;
-  std::string idxPath;
-  std::string srsPath;
-  std::string walPath;
-};
+// Stateless practice order toggle: defaults to Shuffled on boot and persists in RAM across Deck List <-> Review.
+bool gShuffleCardsEnabled = true;
 
 void formatStemFallback(const std::string& filename, char* out, const size_t outSize) {
   if (!out || outSize == 0) return;
@@ -61,37 +60,75 @@ void formatDeckTitle(const flashcards::DeckSummary& summary, const std::string& 
   utf8ComposeNfcInPlace(out);
 }
 
-uint16_t nextNewPerDayPreset(const uint16_t current) noexcept {
-  if (current == 10) return 20;
-  if (current == 20) return 30;
-  if (current == 30) return 50;
-  return 10;
+bool consumeGuardedRelease(const MappedInputManager& input, const MappedInputManager::Button button, bool& guard) {
+  if (!guard) {
+    return false;
+  }
+  if (!input.isPressed(button)) {
+    guard = false;
+    return input.wasReleased(button);
+  }
+  return input.wasReleased(button);
 }
 
 }  // namespace
 
 FlashcardsDeckListActivity::FlashcardsDeckListActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
-    : UiListActivity("FlashcardsDeckList", renderer, mappedInput, /*wantsTouchLongPress=*/true) {}
+    : Activity("FlashcardsDeckList", renderer, mappedInput) {}
 
 void FlashcardsDeckListActivity::onEnter() {
-  UiListActivity::onEnter();
+  {
+    RenderLock lock(*this);
+    Activity::onEnter();
 
-  suppressConfirmRelease = mappedInput.isPressed(MappedInputManager::Button::Confirm);
-  suppressBackRelease = mappedInput.isPressed(MappedInputManager::Button::Back);
+    suppressConfirmRelease = mappedInput.isPressed(MappedInputManager::Button::Confirm);
+    suppressBackRelease = mappedInput.isPressed(MappedInputManager::Button::Back);
+    confirmLongPressHandled = false;
 
-  if (APP_STATE.clearFlashcardsResume() && !APP_STATE.saveToFile()) {
-    LOG_ERR("FCARD", "Failed saving cleared Flashcards resume state");
+    sdFontSystem.ensureLoaded(renderer);
+    appliedOrientation = SETTINGS.orientation;
+    ReaderUtils::applyOrientation(renderer, appliedOrientation);
+
+    selectedIndex = 0;
+    topIndex = 0;
+    visibleRowCount = 0;
+    for (Rect& r : visibleRowRects) {
+      r = Rect{};
+    }
+    forcedRefreshPending = true;
+    popupTitlePrewarmPending = false;
+    baseFrameRendered.store(false, std::memory_order_release);
+
+    loadDecks();
   }
-
-  loadDecks();
+  requestUpdate();
 }
 
 void FlashcardsDeckListActivity::onExit() {
   optionPopup.dismiss();
   Activity::onExit();
+
+  // ActivityManager::exitActivity holds RenderLock during onExit().
+  if (auto* fc = renderer.getFontCacheManager()) {
+    fc->releaseSdFontCaches();
+  }
+
   decks.clear();
   shrinkToFit(decks);
   fileNameBuffer.reset();
+
+  if (renderer.getOrientation() != GfxRenderer::Orientation::Portrait) {
+    renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+  }
+}
+
+bool FlashcardsDeckListActivity::handleForcedRefresh() {
+  {
+    RenderLock lock(*this);
+    forcedRefreshPending = true;
+  }
+  requestUpdate();
+  return true;
 }
 
 std::string FlashcardsDeckListActivity::fullDeckPath(const size_t index) const {
@@ -105,31 +142,33 @@ std::string FlashcardsDeckListActivity::fullDeckPath(const size_t index) const {
 }
 
 void FlashcardsDeckListActivity::refreshActiveSubtitle() {
-  uint16_t active = 0;
-  for (const DeckEntry& entry : decks) {
-    if (!entry.summary.sessionCompleted && (entry.summary.dueCount > 0 || entry.summary.newCount > 0)) {
-      ++active;
-    }
-  }
-  std::snprintf(activeSubtitleBuf, sizeof(activeSubtitleBuf), "%u active", static_cast<unsigned>(active));
+  const unsigned count = static_cast<unsigned>(decks.size());
+  std::snprintf(activeSubtitleBuf, sizeof(activeSubtitleBuf), "%u %s | %s", count, count == 1u ? "deck" : "decks",
+                gShuffleCardsEnabled ? "Shuffle" : "In Order");
 }
 
 bool FlashcardsDeckListActivity::refreshDeckSummary(const size_t index) {
   if (index >= decks.size()) return false;
   DeckEntry& entry = decks[index];
+  entry.summary = flashcards::DeckSummary{};
   const std::string path = fullDeckPath(index);
   const bool ok = flashcards::FlashcardSession::inspectDeck(path.c_str(), FLASHCARDS_CACHE_DIR, entry.summary);
   if (!ok && entry.summary.title[0] == '\0') {
     formatStemFallback(entry.filename, entry.summary.title, sizeof(entry.summary.title));
   }
   prewarmedStart = -1;
+  prewarmedCount = 0;
   refreshActiveSubtitle();
   return ok;
 }
 
 void FlashcardsDeckListActivity::loadDecks() {
+  // Caller must hold RenderLock.
+  HalPowerManager::Lock powerLock;
+
   decks.clear();
   prewarmedStart = -1;
+  prewarmedCount = 0;
 
   if (!Storage.exists(FLASHCARDS_DIR_PATH) && !Storage.mkdir(FLASHCARDS_DIR_PATH)) {
     LOG_ERR("FCARD", "Failed creating directory %s", FLASHCARDS_DIR_PATH);
@@ -216,15 +255,12 @@ void FlashcardsDeckListActivity::loadDecks() {
   // First open of a deck builds its .idx; show feedback once before the slow pass.
   {
     std::string idxPath;
-    std::string srsPath;
-    std::string walPath;
     for (const std::string& name : names) {
       fullPath.assign(FLASHCARDS_DIR_PATH);
       fullPath.push_back('/');
       fullPath.append(name);
-      flashcards::FlashcardSrsStore::buildPaths(FLASHCARDS_CACHE_DIR, fullPath, idxPath, srsPath, walPath);
+      flashcards::FlashcardDeckIndex::buildIndexPath(FLASHCARDS_CACHE_DIR, fullPath, idxPath);
       if (!Storage.exists(idxPath.c_str())) {
-        RenderLock lock(*this);
         GUI.drawPopup(renderer, "Indexing decks...");
         break;
       }
@@ -236,54 +272,33 @@ void FlashcardsDeckListActivity::loadDecks() {
     fullPath.push_back('/');
     fullPath.append(name);
 
-    DeckEntry entry;
+    decks.emplace_back();
+    DeckEntry& entry = decks.back();
     entry.filename = std::move(name);
     if (!flashcards::FlashcardSession::inspectDeck(fullPath.c_str(), FLASHCARDS_CACHE_DIR, entry.summary) &&
         entry.summary.title[0] == '\0') {
       formatStemFallback(entry.filename, entry.summary.title, sizeof(entry.summary.title));
     }
-    decks.push_back(std::move(entry));
   }
 
   refreshActiveSubtitle();
 }
 
-void FlashcardsDeckListActivity::provideRow(void* ctx, const uint16_t index, fui::ListItem& item) {
-  auto* self = static_cast<FlashcardsDeckListActivity*>(ctx);
-  if (index >= self->decks.size()) return;
-
-  const DeckEntry& entry = self->decks[index];
-  const flashcards::DeckSummary& sum = entry.summary;
-
-  formatDeckTitle(sum, entry.filename, self->rowTitleBuf, sizeof(self->rowTitleBuf));
-  item.label = self->rowTitleBuf;
-
-  std::snprintf(self->rowSubtitleBuf, sizeof(self->rowSubtitleBuf), "Session %u \xc2\xb7 %u %s",
-                static_cast<unsigned>(sum.sessionDay), static_cast<unsigned>(sum.totalCards),
-                sum.totalCards == 1 ? "card" : "cards");
-  item.subtitle = self->rowSubtitleBuf;
-
-  if (sum.sessionCompleted) {
-    std::snprintf(self->rowValueBuf, sizeof(self->rowValueBuf), "Done \xc2\xb7 S%u",
-                  static_cast<unsigned>(sum.sessionDay));
-  } else {
-    std::snprintf(self->rowValueBuf, sizeof(self->rowValueBuf), "%u due \xc2\xb7 %u new",
-                  static_cast<unsigned>(sum.dueCount), static_cast<unsigned>(sum.newCount));
-  }
-  item.value = self->rowValueBuf;
-  item.actionValue = static_cast<int16_t>(index);
-}
-
-void FlashcardsDeckListActivity::prewarmRowGlyphs(const int start) {
+void FlashcardsDeckListActivity::prewarmRowGlyphs(const int start, const int visibleRows) {
   const int total = static_cast<int>(decks.size());
   if (total <= 0) return;
+
+  const int neededEnd = std::min(total, start + std::max(1, visibleRows));
+  if (prewarmedStart >= 0 && start >= prewarmedStart && neededEnd <= prewarmedStart + prewarmedCount) {
+    return;
+  }
 
   int clamped = start;
   if (clamped > total - PREWARM_WINDOW) clamped = total - PREWARM_WINDOW;
   if (clamped < 0) clamped = 0;
-  if (clamped == prewarmedStart) return;
+  const int count = std::min(total - clamped, PREWARM_WINDOW);
   prewarmedStart = clamped;
-  const int count = (total - clamped < PREWARM_WINDOW) ? (total - clamped) : PREWARM_WINDOW;
+  prewarmedCount = count;
 
   struct PrewarmCtx {
     FlashcardsDeckListActivity* self;
@@ -292,7 +307,7 @@ void FlashcardsDeckListActivity::prewarmRowGlyphs(const int start) {
   } prewarmCtx{this, clamped, count};
 
   renderer.prewarmFallbackText(
-      uiScaleSpec().bodyFontId,
+      UI_10_FONT_ID,
       [](const void* ctx, const uint32_t i) -> const char* {
         auto* c = const_cast<PrewarmCtx*>(static_cast<const PrewarmCtx*>(ctx));
         if (i < static_cast<uint32_t>(c->count)) {
@@ -302,136 +317,353 @@ void FlashcardsDeckListActivity::prewarmRowGlyphs(const int start) {
         }
         return "";
       },
-      &prewarmCtx, static_cast<uint32_t>(count));
+      &prewarmCtx, static_cast<uint32_t>(count), EpdFontFamily::BOLD);
 }
 
-void FlashcardsDeckListActivity::buildScreen(UiScreen& screen) {
+void FlashcardsDeckListActivity::drawDeckListFrame() {
+  renderer.clearScreen();
+
+  const Rect safeArea = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const Rect headerRect = UITheme::getInstance().getHeaderRect(renderer, true, false);
+  GUI.drawHeader(renderer, headerRect, HEADER_TITLE, decks.empty() ? nullptr : activeSubtitleBuf, true);
+
+  visibleRowCount = 0;
+  for (Rect& r : visibleRowRects) {
+    r = Rect{};
+  }
+
   const auto& metrics = UITheme::getInstance().getMetrics();
-  screen.setContentMarginFromScreen(fui::Insets{static_cast<int16_t>(metrics.topPadding + metrics.headerHeight), 0,
-                                                static_cast<int16_t>(metrics.buttonHintsHeight), 0});
-  screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
+  const int sidePad = metrics.contentSidePadding;
+  const int contentTop = std::max(safeArea.y, headerRect.y + headerRect.height);
+  const int contentBottom = safeArea.y + safeArea.height;
+  const int bodyX = safeArea.x + sidePad;
+  const int bodyWidth = std::max(80, safeArea.width - sidePad * 2);
 
   if (decks.empty()) {
-    const auto& theme = screen.theme();
-    const fui::Rect body = screen.body().inset(fui::Insets{0, static_cast<int16_t>(metrics.contentSidePadding), 0,
-                                                           static_cast<int16_t>(metrics.contentSidePadding)});
-    fui::TextStyle headingStyle = theme.bodyText;
-    headingStyle.bold = true;
-    headingStyle.align = fui::TextAlign::Center;
-    fui::TextStyle subStyle = theme.smallText;
-    subStyle.align = fui::TextAlign::Center;
-    subStyle.maxLines = 2;
+    const int bodyHeight = std::max(40, contentBottom - contentTop);
+    const int headingH = renderer.getLineHeight(UI_12_FONT_ID);
+    const int subLineH = renderer.getLineHeight(UI_10_FONT_ID);
+    constexpr int gap = 8;
 
-    const int16_t headingH = screen.target().lineHeight(headingStyle.font);
-    const int16_t subH = fui::measureWrappedText(screen.target(), EMPTY_SUBTITLE, subStyle,
-                                                 body.width > 1 ? body.width : static_cast<int16_t>(1))
-                             .height;
-    const int16_t totalH = static_cast<int16_t>(headingH + theme.spaceSm + subH);
-    const int16_t topY = static_cast<int16_t>(body.y + std::max<int>(0, (body.height - totalH) / 2));
+    if (renderer.getTextWidth(UI_10_FONT_ID, EMPTY_SUBTITLE, EpdFontFamily::REGULAR) <= bodyWidth) {
+      const int totalTextH = headingH + gap + subLineH;
+      const int topY = contentTop + std::max(0, (bodyHeight - totalTextH) / 2);
+      const Rect lineBounds{bodyX, topY, bodyWidth, totalTextH};
+      UITheme::drawCenteredText(renderer, lineBounds, UI_12_FONT_ID, topY, EMPTY_HEADING, true, EpdFontFamily::BOLD);
+      UITheme::drawCenteredText(renderer, lineBounds, UI_10_FONT_ID, topY + headingH + gap, EMPTY_SUBTITLE, true,
+                                EpdFontFamily::REGULAR);
+    } else {
+      const auto subLines = renderer.wrappedText(UI_10_FONT_ID, EMPTY_SUBTITLE, bodyWidth, 3, EpdFontFamily::REGULAR);
+      const int subBlockH = static_cast<int>(subLines.size()) * subLineH;
+      const int totalTextH = headingH + gap + subBlockH;
+      const int topY = contentTop + std::max(0, (bodyHeight - totalTextH) / 2);
+      const Rect lineBounds{bodyX, topY, bodyWidth, totalTextH};
+      UITheme::drawCenteredText(renderer, lineBounds, UI_12_FONT_ID, topY, EMPTY_HEADING, true, EpdFontFamily::BOLD);
+      int lineY = topY + headingH + gap;
+      for (const auto& line : subLines) {
+        UITheme::drawCenteredText(renderer, lineBounds, UI_10_FONT_ID, lineY, line.c_str(), true,
+                                  EpdFontFamily::REGULAR);
+        lineY += subLineH;
+      }
+    }
 
-    screen.target().text(fui::Rect{body.x, topY, body.width, headingH}, EMPTY_HEADING, headingStyle);
-    screen.target().text(fui::Rect{body.x, static_cast<int16_t>(topY + headingH + theme.spaceSm), body.width, subH},
-                         EMPTY_SUBTITLE, subStyle);
+    const auto labels = mappedInput.mapLabels("Home", "", "", "");
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    baseFrameRendered.store(true, std::memory_order_release);
     return;
   }
 
-  fui::ListProps props;
-  props.rowProvider = &FlashcardsDeckListActivity::provideRow;
-  props.rowProviderCtx = this;
-  props.count = static_cast<uint16_t>(decks.size());
-  props.action = ACTION_ROW;
-  props.inputMask = fui::InputTouch | fui::InputLongPress;
-  props.valueInset = 8;
-  props.labelText = screen.theme().bodyText;
-  props.labelText.maxLines = 1;
-  props.rowHeight = static_cast<int16_t>(metrics.listWithSubtitleRowHeight);
-  props.rowGap = std::max<int16_t>(screen.theme().listRowGap, 6);
+  const int listTop = contentTop + 8;
+  const int listBottom = contentBottom - 6;
+  const int listAvailH = std::max(80, listBottom - listTop);
 
-  syncListViewport(screen, props);
-  prewarmRowGlyphs(nav.top);
-  screen.list(props);
-}
+  const int titleLineH = renderer.getLineHeight(UI_10_FONT_ID);
+  constexpr int rowGap = 6;
+  const int naturalRowH = 12 + titleLineH + 12;
+  const int minRowH = 8 + titleLineH + 8;
 
-void FlashcardsDeckListActivity::drawChrome() {
-  const auto pageWidth = renderer.getScreenWidth();
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, HEADER_TITLE,
-                 decks.empty() ? nullptr : activeSubtitleBuf);
-}
+  int rowH = naturalRowH;
+  if (listAvailH < 4 * naturalRowH + 3 * rowGap) {
+    rowH = std::clamp((listAvailH - 3 * rowGap) / 4, minRowH, naturalRowH);
+  }
 
-void FlashcardsDeckListActivity::drawFooter() {
-  const bool hasDecks = !decks.empty();
-  const auto labels =
-      mappedInput.mapLabels("Home", hasDecks ? "Open" : "", hasDecks ? "Up" : "", hasDecks ? "Down" : "");
+  const int visibleRows = std::clamp((listAvailH + rowGap) / (rowH + rowGap), 1, static_cast<int>(MAX_VISIBLE_ROWS));
+  lastVisibleRows = visibleRows;
+
+  const int total = static_cast<int>(decks.size());
+  selectedIndex = std::clamp(selectedIndex, 0, total - 1);
+  if (selectedIndex < topIndex) {
+    topIndex = selectedIndex;
+  } else if (selectedIndex >= topIndex + visibleRows) {
+    topIndex = selectedIndex - visibleRows + 1;
+  }
+  topIndex = std::clamp(topIndex, 0, std::max(0, total - visibleRows));
+
+  prewarmRowGlyphs(topIndex, visibleRows);
+
+  const bool hasScrollbar = total > visibleRows;
+  constexpr int scrollWidth = 3;
+  constexpr int scrollGap = 7;
+  const int rowX = bodyX;
+  const int rowWidth = hasScrollbar ? std::max(60, bodyWidth - scrollWidth - scrollGap) : bodyWidth;
+
+  const int countToDraw = std::min(visibleRows, total - topIndex);
+  for (int vis = 0; vis < countToDraw; ++vis) {
+    const int idx = topIndex + vis;
+    const int rowY = listTop + vis * (rowH + rowGap);
+    const Rect rowRect{rowX, rowY, rowWidth, rowH};
+    visibleRowRects[vis] = rowRect;
+    visibleRowIndices[vis] = idx;
+    ++visibleRowCount;
+
+    renderer.fillRect(rowRect.x, rowRect.y, rowRect.width, rowRect.height, false);
+    if (idx == selectedIndex) {
+      renderer.drawRoundedRect(rowRect.x, rowRect.y, rowRect.width, rowRect.height, 2, 8, true);
+    } else if (idx + 1 != selectedIndex) {
+      const int divY = rowRect.y + rowRect.height + rowGap / 2;
+      if (rowRect.width > 14) {
+        renderer.drawLine(rowRect.x + 6, divY, rowRect.x + rowRect.width - 7, divY, true);
+      }
+    }
+
+    const DeckEntry& entry = decks[static_cast<size_t>(idx)];
+    const flashcards::DeckSummary& sum = entry.summary;
+
+    constexpr int insetX = 14;
+    const int innerLeft = rowRect.x + insetX;
+    const int innerRight = rowRect.x + rowRect.width - insetX;
+    const int innerW = std::max(24, rowRect.width - insetX * 2);
+    const int textY = rowRect.y + (rowRect.height - titleLineH) / 2;
+
+    std::snprintf(rowValueBuf, sizeof(rowValueBuf), "%u %s", static_cast<unsigned>(sum.totalCards),
+                  sum.totalCards == 1u ? "card" : "cards");
+    const int countW = renderer.getTextWidth(UI_10_FONT_ID, rowValueBuf, EpdFontFamily::REGULAR);
+    renderer.drawText(UI_10_FONT_ID, std::max(innerLeft, innerRight - countW), textY, rowValueBuf, true,
+                      EpdFontFamily::REGULAR);
+
+    formatDeckTitle(sum, entry.filename, rowTitleBuf, sizeof(rowTitleBuf));
+    const int maxTitleW = std::max(24, innerW - countW - 12);
+    if (renderer.getTextWidth(UI_10_FONT_ID, rowTitleBuf, EpdFontFamily::BOLD) <= maxTitleW) {
+      renderer.drawText(UI_10_FONT_ID, innerLeft, textY, rowTitleBuf, true, EpdFontFamily::BOLD);
+    } else {
+      const std::string clippedTitle =
+          renderer.truncatedText(UI_10_FONT_ID, rowTitleBuf, maxTitleW, EpdFontFamily::BOLD);
+      renderer.drawText(UI_10_FONT_ID, innerLeft, textY, clippedTitle.c_str(), true, EpdFontFamily::BOLD);
+    }
+  }
+
+  if (hasScrollbar) {
+    const int trackX = bodyX + bodyWidth - scrollWidth;
+    const int trackY = listTop;
+    const int trackH = visibleRows * rowH + (visibleRows - 1) * rowGap;
+    renderer.fillRectDither(trackX, trackY, scrollWidth, trackH, Color::LightGray);
+    const int maxTop = std::max(1, total - visibleRows);
+    const int thumbH = std::max(16, (trackH * visibleRows) / total);
+    const int thumbTravel = std::max(0, trackH - thumbH);
+    const int thumbY = trackY + (thumbTravel * topIndex) / maxTop;
+    renderer.fillRect(trackX, thumbY, scrollWidth, thumbH, true);
+  }
+
+  const auto labels = mappedInput.mapLabels("Home", "Open", "Up", "Down");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+
+  baseFrameRendered.store(true, std::memory_order_release);
 }
 
 void FlashcardsDeckListActivity::render(RenderLock&& lock) {
-  if (optionPopup.processRender(renderer, mappedInput)) return;
-  UiListActivity::render(std::move(lock));
-}
+  (void)lock;
 
-void FlashcardsDeckListActivity::activateIndex(const int index) {
-  (void)index;
-  app.clearTapFlash();
-  openSelectedDeck();
-}
+  drawDeckListFrame();
 
-void FlashcardsDeckListActivity::onRowLongPress(const int index) {
-  (void)index;
-  app.clearTapFlash();
-  showDeckOptions();
-}
-
-bool FlashcardsDeckListActivity::handleCustomInput() {
-  if (optionPopup.handleInput(mappedInput, [this] { requestUpdate(); })) return true;
-
-  if (suppressConfirmRelease) {
-    if (!mappedInput.isPressed(MappedInputManager::Button::Confirm)) {
-      suppressConfirmRelease = false;
+  if (optionPopup.isActive()) {
+    HeaderBackTapTarget::clear();
+    if (popupTitlePrewarmPending) {
+      popupTitlePrewarmPending = false;
+      renderer.prewarmFallbackText(uiScaleSpec().bodyFontId, popupTitleBuf, EpdFontFamily::BOLD);
     }
-    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-      return true;
+    if (forcedRefreshPending) {
+      forcedRefreshPending = false;
+      renderer.promoteNextRefresh(HalDisplay::HALF_REFRESH);
+    }
+    if (optionPopup.processRender(renderer, mappedInput)) {
+      return;
     }
   }
-  if (suppressBackRelease) {
-    if (!mappedInput.isPressed(MappedInputManager::Button::Back)) {
-      suppressBackRelease = false;
-    }
-    if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-      return true;
-    }
-  }
-  return false;
+
+  const HalDisplay::RefreshMode refreshMode =
+      forcedRefreshPending ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH;
+  forcedRefreshPending = false;
+  renderer.displayBuffer(refreshMode);
 }
 
-bool FlashcardsDeckListActivity::handleButtons() {
-  if (!decks.empty() && mappedInput.wasLongPressed(MappedInputManager::Button::Confirm, OPTION_LONG_PRESS_MS)) {
-    app.clearTapFlash();
+int FlashcardsDeckListActivity::hitTestVisibleRow(const int x, const int y) const noexcept {
+  for (int i = 0; i < visibleRowCount && i < static_cast<int>(MAX_VISIBLE_ROWS); ++i) {
+    const Rect& r = visibleRowRects[i];
+    if (r.width > 0 && r.height > 0 && x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height) {
+      return visibleRowIndices[i];
+    }
+  }
+  return -1;
+}
+
+void FlashcardsDeckListActivity::moveSelectionTo(const int index) {
+  bool changed = false;
+  {
+    RenderLock lock(*this);
+    const int total = static_cast<int>(decks.size());
+    if (total <= 0) return;
+    const int clamped = std::clamp(index, 0, total - 1);
+    if (clamped != selectedIndex) {
+      selectedIndex = clamped;
+      if (selectedIndex < topIndex) {
+        topIndex = selectedIndex;
+      } else if (selectedIndex >= topIndex + lastVisibleRows) {
+        topIndex = selectedIndex - lastVisibleRows + 1;
+      }
+      topIndex = std::clamp(topIndex, 0, std::max(0, total - lastVisibleRows));
+      changed = true;
+    }
+  }
+  if (changed) {
+    requestUpdate();
+  }
+}
+
+void FlashcardsDeckListActivity::loop() {
+  if (appliedOrientation != SETTINGS.orientation) {
+    {
+      RenderLock lock(*this);
+      appliedOrientation = SETTINGS.orientation;
+      ReaderUtils::applyOrientation(renderer, appliedOrientation);
+      forcedRefreshPending = true;
+      baseFrameRendered.store(false, std::memory_order_release);
+    }
+    requestUpdate();
+  }
+
+  if (consumeGuardedRelease(mappedInput, MappedInputManager::Button::Confirm, suppressConfirmRelease)) {
+    return;
+  }
+  if (consumeGuardedRelease(mappedInput, MappedInputManager::Button::Confirm, confirmLongPressHandled)) {
+    return;
+  }
+  if (consumeGuardedRelease(mappedInput, MappedInputManager::Button::Back, suppressBackRelease)) {
+    return;
+  }
+
+  if (optionPopup.handleInput(mappedInput, [this] {
+        if (!optionPopup.isActive()) {
+          RenderLock lock(*this);
+          forcedRefreshPending = true;
+        }
+        requestUpdate();
+      })) {
+    return;
+  }
+
+  if (!decks.empty() && !suppressConfirmRelease &&
+      mappedInput.wasLongPressed(MappedInputManager::Button::Confirm, OPTION_LONG_PRESS_MS)) {
+    confirmLongPressHandled = true;
     showDeckOptions();
-    return true;
+    return;
   }
 
-  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    app.clearTapFlash();
+  if (!suppressConfirmRelease && !confirmLongPressHandled &&
+      mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     openSelectedDeck();
-    return true;
+    return;
   }
 
-  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+  if (!suppressBackRelease && mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     onGoHome(HomeMenuItem::FLASHCARDS);
-    return true;
+    return;
   }
 
-  return false;
+  if (mappedInput.hasTouch() && !decks.empty() && baseFrameRendered.load(std::memory_order_acquire)) {
+    int lx = 0;
+    int ly = 0;
+    if (mappedInput.wasScreenLongPress(lx, ly)) {
+      int hitIdx = -1;
+      {
+        RenderLock lock(*this);
+        hitIdx = hitTestVisibleRow(lx, ly);
+        if (hitIdx >= 0 && hitIdx < static_cast<int>(decks.size())) {
+          selectedIndex = hitIdx;
+        }
+      }
+      if (hitIdx >= 0 && hitIdx < static_cast<int>(decks.size())) {
+        haptic_feedback::touchAction(true);
+        showDeckOptions();
+      }
+      return;
+    }
+
+    int tx = 0;
+    int ty = 0;
+    if (mappedInput.wasScreenTapped(tx, ty)) {
+      int hitIdx = -1;
+      {
+        RenderLock lock(*this);
+        hitIdx = hitTestVisibleRow(tx, ty);
+        if (hitIdx >= 0 && hitIdx < static_cast<int>(decks.size())) {
+          selectedIndex = hitIdx;
+        }
+      }
+      if (hitIdx >= 0 && hitIdx < static_cast<int>(decks.size())) {
+        haptic_feedback::touchAction();
+        openSelectedDeck();
+      }
+      return;
+    }
+
+    const auto swipe = mappedInput.wasSwipe();
+    if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down) {
+      bool scrolled = false;
+      {
+        RenderLock lock(*this);
+        const int total = static_cast<int>(decks.size());
+        const int pageRows = std::max(1, lastVisibleRows);
+        const int delta = (swipe == MappedInputManager::SwipeDir::Up) ? pageRows : -pageRows;
+        const int nextTop = std::clamp(topIndex + delta, 0, std::max(0, total - pageRows));
+        const int maxSel = std::min(total - 1, nextTop + pageRows - 1);
+        const int nextSel = std::clamp(selectedIndex, nextTop, std::max(nextTop, maxSel));
+        if (nextTop != topIndex || nextSel != selectedIndex) {
+          topIndex = nextTop;
+          selectedIndex = nextSel;
+          scrolled = true;
+        }
+      }
+      if (scrolled) {
+        requestUpdate();
+      }
+      return;
+    }
+  }
+
+  if (decks.empty()) {
+    return;
+  }
+
+  const int total = static_cast<int>(decks.size());
+  buttonNavigator.onNextPress([this, total] { moveSelectionTo(ButtonNavigator::nextIndex(selectedIndex, total)); });
+  buttonNavigator.onPreviousPress(
+      [this, total] { moveSelectionTo(ButtonNavigator::previousIndex(selectedIndex, total)); });
+  buttonNavigator.onNextContinuous([this, total] {
+    moveSelectionTo(ButtonNavigator::nextPageIndex(selectedIndex, total, std::max(1, lastVisibleRows)));
+  });
+  buttonNavigator.onPreviousContinuous([this, total] {
+    moveSelectionTo(ButtonNavigator::previousPageIndex(selectedIndex, total, std::max(1, lastVisibleRows)));
+  });
 }
 
 void FlashcardsDeckListActivity::openSelectedDeck() {
-  const int sel = nav.selected.load();
-  if (decks.empty() || sel < 0 || sel >= listCount()) return;
+  if (decks.empty() || selectedIndex < 0 || selectedIndex >= static_cast<int>(decks.size())) {
+    return;
+  }
 
-  std::string path = fullDeckPath(static_cast<size_t>(sel));
-  auto review = makeUniqueNoThrow<FlashcardsReviewActivity>(renderer, mappedInput, std::move(path), false);
+  std::string path = fullDeckPath(static_cast<size_t>(selectedIndex));
+  auto review =
+      makeUniqueNoThrow<FlashcardsReviewActivity>(renderer, mappedInput, std::move(path), gShuffleCardsEnabled);
   if (!review) {
     LOG_ERR("FCARD", "OOM allocating %u-byte FlashcardsReviewActivity",
             static_cast<unsigned>(sizeof(FlashcardsReviewActivity)));
@@ -441,126 +673,46 @@ void FlashcardsDeckListActivity::openSelectedDeck() {
 }
 
 void FlashcardsDeckListActivity::showDeckOptions() {
-  const int sel = nav.selected.load();
-  if (decks.empty() || optionPopup.isActive() || sel < 0 || sel >= listCount()) {
+  if (decks.empty() || optionPopup.isActive() || selectedIndex < 0 || selectedIndex >= static_cast<int>(decks.size())) {
     return;
   }
 
-  const size_t index = static_cast<size_t>(sel);
+  const size_t index = static_cast<size_t>(selectedIndex);
   const DeckEntry& entry = decks[index];
-  char titleBuf[96]{};
-  formatDeckTitle(entry.summary, entry.filename, titleBuf, sizeof(titleBuf));
-
-  const uint32_t nextDay = (entry.summary.sessionDay < std::numeric_limits<uint32_t>::max())
-                               ? (entry.summary.sessionDay + 1u)
-                               : std::numeric_limits<uint32_t>::max();
-  char optNext[44]{};
-  char optNewLimit[36]{};
-  std::snprintf(optNext, sizeof(optNext), "Start Next Session (S%u)", static_cast<unsigned>(nextDay));
-  std::snprintf(optNewLimit, sizeof(optNewLimit), "New Cards / Session: %u",
-                static_cast<unsigned>(entry.summary.newPerDay));
-  const char* options[3] = {optNext, optNewLimit, "Reset Deck Progress"};
-
-  optionPopup.show(titleBuf, options, 3, 0, [this, index](const int optionIdx) {
-    if (optionIdx == 0) {
-      startNextSessionAndOpen(index);
-    } else if (optionIdx == 1) {
-      cycleNewCardsPerSession(index);
-    } else if (optionIdx == 2) {
-      confirmResetDeck(index);
-    }
-  });
-  requestUpdate();
-}
-
-void FlashcardsDeckListActivity::startNextSessionAndOpen(const size_t index) {
-  if (index >= decks.size()) return;
-  std::string path = fullDeckPath(index);
-
-  auto session = makeUniqueNoThrow<flashcards::FlashcardSession>();
-  if (!session) {
-    LOG_ERR("FCARD", "OOM allocating %u-byte FlashcardSession for next session",
-            static_cast<unsigned>(sizeof(flashcards::FlashcardSession)));
-    return;
-  }
-  if (!session->open(path.c_str(), FLASHCARDS_CACHE_DIR)) {
-    LOG_ERR("FCARD", "Failed opening %s to start next session", path.c_str());
-    return;
-  }
-  if (!session->startNextSession()) {
-    LOG_ERR("FCARD", "Failed advancing session for %s", path.c_str());
-    session->close();
-    return;
-  }
-  session->close();
-  session.reset();
-
-  auto review = makeUniqueNoThrow<FlashcardsReviewActivity>(renderer, mappedInput, std::move(path), false);
-  if (!review) {
-    LOG_ERR("FCARD", "OOM allocating %u-byte FlashcardsReviewActivity",
-            static_cast<unsigned>(sizeof(FlashcardsReviewActivity)));
-    return;
-  }
-  activityManager.replaceActivity(std::move(review));
-}
-
-void FlashcardsDeckListActivity::cycleNewCardsPerSession(const size_t index) {
-  if (index >= decks.size()) return;
-  const std::string path = fullDeckPath(index);
-  const uint16_t nextLimit = nextNewPerDayPreset(decks[index].summary.newPerDay);
-
-  if (!flashcards::FlashcardDeckIndex::ensureDir(FLASHCARDS_CACHE_DIR)) {
-    return;
-  }
-
-  auto ws = makeUniqueNoThrow<SrsEditWorkspace>();
-  if (!ws) {
-    LOG_ERR("FCARD", "OOM allocating %u-byte SrsEditWorkspace", static_cast<unsigned>(sizeof(SrsEditWorkspace)));
-    return;
-  }
-  flashcards::FlashcardSrsStore::buildPaths(FLASHCARDS_CACHE_DIR, path, ws->idxPath, ws->srsPath, ws->walPath);
-  if (!ws->store.load(ws->srsPath.c_str(), ws->walPath.c_str())) {
-    LOG_ERR("FCARD", "Failed loading SRS store for %s", path.c_str());
-    return;
-  }
-  if (!ws->store.setNewPerDayOverride(nextLimit)) {
-    LOG_ERR("FCARD", "Failed saving newPerDay override (%u) for %s", static_cast<unsigned>(nextLimit), path.c_str());
-    return;
-  }
-  ws.reset();
-
   {
     RenderLock lock(*this);
-    refreshDeckSummary(index);
+    formatDeckTitle(entry.summary, entry.filename, popupTitleBuf, sizeof(popupTitleBuf));
+    popupTitlePrewarmPending = true;
+
+    const char* options[2] = {
+        gShuffleCardsEnabled ? "Card Order: Shuffled" : "Card Order: Original",
+        "Rebuild Deck Index",
+    };
+
+    optionPopup.show(popupTitleBuf, options, 2, 0, [this, index](const int optionIdx) {
+      if (optionIdx == 0) {
+        {
+          RenderLock cbLock(*this);
+          gShuffleCardsEnabled = !gShuffleCardsEnabled;
+          refreshActiveSubtitle();
+          forcedRefreshPending = true;
+        }
+        requestUpdate();
+      } else if (optionIdx == 1) {
+        {
+          RenderLock cbLock(*this);
+          if (index >= decks.size()) return;
+          HalPowerManager::Lock powerLock;
+          const std::string path = fullDeckPath(index);
+          if (!flashcards::FlashcardDeckIndex::removeIndex(FLASHCARDS_CACHE_DIR, path)) {
+            LOG_ERR("FCARD", "Failed removing deck index for %s", path.c_str());
+          }
+          refreshDeckSummary(index);
+          forcedRefreshPending = true;
+        }
+        requestUpdate();
+      }
+    });
   }
   requestUpdate();
-}
-
-void FlashcardsDeckListActivity::confirmResetDeck(const size_t index) {
-  if (index >= decks.size()) return;
-
-  std::string path = fullDeckPath(index);
-  char titleBuf[96]{};
-  formatDeckTitle(decks[index].summary, decks[index].filename, titleBuf, sizeof(titleBuf));
-  std::string title(titleBuf);
-
-  auto confirmation =
-      makeUniqueNoThrow<ConfirmationActivity>(renderer, mappedInput, "Reset Deck Progress?", title, "Cancel", "Reset");
-  if (!confirmation) {
-    LOG_ERR("FCARD", "OOM allocating %u-byte ConfirmationActivity",
-            static_cast<unsigned>(sizeof(ConfirmationActivity)));
-    return;
-  }
-
-  startActivityForResult(std::move(confirmation), [this, index, path = std::move(path)](const ActivityResult& res) {
-    if (res.isCancelled) return;
-    if (!flashcards::FlashcardSrsStore::resetDeck(FLASHCARDS_CACHE_DIR, path)) {
-      LOG_ERR("FCARD", "Failed resetting deck progress for %s", path.c_str());
-    }
-    {
-      RenderLock lock(*this);
-      refreshDeckSummary(index);
-    }
-    requestUpdate(true);
-  });
 }

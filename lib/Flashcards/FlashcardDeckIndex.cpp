@@ -5,11 +5,17 @@
 #include <Memory.h>
 #include <Serialization.h>
 
+#ifdef ESP_PLATFORM
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#endif
+
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -17,7 +23,10 @@ namespace flashcards {
 
 namespace {
 
+constexpr const char* DEFAULT_CACHE_DIR = "/.crosspoint/flashcards";
 constexpr size_t STREAM_READ_CHUNK_BYTES = 2048;
+constexpr size_t INLINE_DEDUP_CAP = 256;
+constexpr size_t MAX_DEDUP_CAP = 4096;
 
 bool isAsciiSpace(char c) noexcept { return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\v' || c == '\f'; }
 
@@ -279,7 +288,42 @@ struct IndexBuildWorkspace {
   HalFile tmpFile;
   JsonDocument doc;
   std::string tmpPath;
+  uint64_t inlineSeen[INLINE_DEDUP_CAP]{};
+  std::unique_ptr<uint64_t[]> overflowSeen;
+  size_t seenCount = 0;
 };
+
+bool recordSeenCardId(IndexBuildWorkspace& ws, uint64_t cardIdHash, uint32_t lineOffset, bool& outDuplicate) {
+  uint64_t* table = ws.overflowSeen ? ws.overflowSeen.get() : ws.inlineSeen;
+  uint64_t* it = std::lower_bound(table, table + ws.seenCount, cardIdHash);
+  if (it != table + ws.seenCount && *it == cardIdHash) {
+    LOG_ERR("FCARD", "Skipping duplicate card id at offset %u", static_cast<unsigned>(lineOffset));
+    outDuplicate = true;
+    return true;
+  }
+
+  outDuplicate = false;
+  if (ws.seenCount == INLINE_DEDUP_CAP && !ws.overflowSeen) {
+    ws.overflowSeen = makeUniqueNoThrow<uint64_t[]>(MAX_DEDUP_CAP);
+    if (!ws.overflowSeen) {
+      LOG_ERR("FCARD", "OOM allocating %u-byte card ID dedup table",
+              static_cast<unsigned>(MAX_DEDUP_CAP * sizeof(uint64_t)));
+      return false;
+    }
+    std::memcpy(ws.overflowSeen.get(), ws.inlineSeen, INLINE_DEDUP_CAP * sizeof(uint64_t));
+    table = ws.overflowSeen.get();
+    it = std::lower_bound(table, table + ws.seenCount, cardIdHash);
+  }
+
+  const size_t cap = ws.overflowSeen ? MAX_DEDUP_CAP : INLINE_DEDUP_CAP;
+  if (ws.seenCount < cap) {
+    const size_t insertIdx = static_cast<size_t>(it - table);
+    std::memmove(table + insertIdx + 1, table + insertIdx, (ws.seenCount - insertIdx) * sizeof(uint64_t));
+    table[insertIdx] = cardIdHash;
+    ++ws.seenCount;
+  }
+  return true;
+}
 
 bool indexSingleLine(char* line, size_t lineLen, uint32_t lineOffset, IndexBuildWorkspace& ws) {
   if (!hasNonWhitespace(std::string_view(line, lineLen))) {
@@ -299,14 +343,7 @@ bool indexSingleLine(char* line, size_t lineLen, uint32_t lineOffset, IndexBuild
       std::memset(ws.newHead.title, 0, sizeof(ws.newHead.title));
       copyUtf8Truncated(ws.newHead.title, sizeof(ws.newHead.title), metaTitle);
     }
-    if (!obj["newPerDay"].isNull()) {
-      const int32_t rawNew = obj["newPerDay"] | static_cast<int32_t>(DEFAULT_NEW_PER_DAY);
-      ws.newHead.newPerDay = static_cast<uint16_t>(std::clamp<int32_t>(rawNew, 0, MAX_NEW_PER_DAY));
-    }
-    if (!obj["maxReviews"].isNull()) {
-      const int32_t rawMax = obj["maxReviews"] | static_cast<int32_t>(DEFAULT_MAX_REVIEWS);
-      ws.newHead.maxReviews = static_cast<uint16_t>(std::clamp<int32_t>(rawMax, 1, MAX_REVIEWS_CAP));
-    }
+    // Optional legacy "newPerDay" / "maxReviews" keys are intentionally ignored in stateless v1.
     return true;
   }
 
@@ -317,13 +354,22 @@ bool indexSingleLine(char* line, size_t lineLen, uint32_t lineOffset, IndexBuild
     return true;
   }
 
+  const uint64_t cardIdHash = computeCardIdHash(obj, rawFront);
+  bool isDuplicate = false;
+  if (!recordSeenCardId(ws, cardIdHash, lineOffset, isDuplicate)) {
+    return false;
+  }
+  if (isDuplicate) {
+    return true;
+  }
+
   if (ws.newHead.cardCount == std::numeric_limits<uint32_t>::max()) {
     LOG_ERR("FCARD", "Card count overflow at offset %u", static_cast<unsigned>(lineOffset));
     return false;
   }
 
   CardIndexRecord rec{};
-  rec.cardIdHash = computeCardIdHash(obj, rawFront);
+  rec.cardIdHash = cardIdHash;
   rec.byteOffset = lineOffset;
   rec.byteLength = static_cast<uint16_t>(lineLen);
   rec.flags = 0;
@@ -379,6 +425,46 @@ bool FlashcardDeckIndex::ensureDir(const char* dirPath) {
   return true;
 }
 
+void FlashcardDeckIndex::buildIndexPath(const char* cacheDir, std::string_view deckPath, std::string& outIdxPath) {
+  std::string_view dir =
+      (cacheDir && cacheDir[0] != '\0') ? std::string_view(cacheDir) : std::string_view(DEFAULT_CACHE_DIR);
+  while (dir.size() > 1 && dir.back() == '/') {
+    dir.remove_suffix(1);
+  }
+
+  char hex[17]{};
+  formatDeckHashHex(deckPath, hex);
+
+  outIdxPath.clear();
+  outIdxPath.reserve(dir.size() + 1 + 16 + 4);
+  outIdxPath.append(dir.data(), dir.size());
+  if (outIdxPath.empty() || outIdxPath.back() != '/') {
+    outIdxPath.push_back('/');
+  }
+  outIdxPath.append(hex, 16);
+  outIdxPath.append(".idx", 4);
+}
+
+bool FlashcardDeckIndex::removeIndex(const char* cacheDir, std::string_view deckPath) {
+  std::string path;
+  buildIndexPath(cacheDir, deckPath, path);
+  path.reserve(path.size() + 4);
+
+  bool ok = true;
+  if (Storage.exists(path.c_str()) && !Storage.remove(path.c_str())) {
+    LOG_ERR("FCARD", "Failed removing deck index %s", path.c_str());
+    ok = false;
+  }
+
+  path.append(".tmp", 4);
+  if (Storage.exists(path.c_str()) && !Storage.remove(path.c_str())) {
+    LOG_ERR("FCARD", "Failed removing temporary deck index %s", path.c_str());
+    ok = false;
+  }
+
+  return ok;
+}
+
 void FlashcardDeckIndex::close() {
   if (idxFile.isOpen()) {
     idxFile.close();
@@ -413,8 +499,6 @@ bool FlashcardDeckIndex::tryOpenValidIndex(const char* idxPath, uint32_t actualD
   }
 
   candidate.title[sizeof(candidate.title) - 1] = '\0';
-  candidate.newPerDay = std::min<uint16_t>(candidate.newPerDay, MAX_NEW_PER_DAY);
-  candidate.maxReviews = std::clamp<uint16_t>(candidate.maxReviews, 1, MAX_REVIEWS_CAP);
   head = candidate;
   opened = true;
   return true;
@@ -443,8 +527,6 @@ bool FlashcardDeckIndex::buildIndex(const char* jsonlPath, const char* idxPath, 
   ws->newHead.version = DECK_INDEX_VERSION;
   ws->newHead.deckFileSize = actualDeckSize;
   ws->newHead.cardCount = 0;
-  ws->newHead.newPerDay = DEFAULT_NEW_PER_DAY;
-  ws->newHead.maxReviews = DEFAULT_MAX_REVIEWS;
   extractStemTitle(jsonlPath, ws->newHead.title);
 
   if (!ensureParentDir(idxPath)) {
@@ -483,6 +565,9 @@ bool FlashcardDeckIndex::buildIndex(const char* jsonlPath, const char* idxPath, 
   uint32_t streamOffset = 0;
   uint32_t lineStartOffset = 0;
   size_t lineLen = 0;
+#ifdef ESP_PLATFORM
+  uint32_t chunksRead = 0;
+#endif
   bool lineOverflowed = false;
   bool pendingCr = false;
 
@@ -536,7 +621,21 @@ bool FlashcardDeckIndex::buildIndex(const char* jsonlPath, const char* idxPath, 
         }
       }
     }
+
+#ifdef ESP_PLATFORM
+    if ((++chunksRead & 0xFu) == 0u) {
+      vTaskDelay(1);
+    }
+#endif
   }
+
+#ifdef ESP_PLATFORM
+  // Also yield once per cold deck build when a deck is < 32 KB so indexing
+  // up to MAX_DECKS small decks back-to-back cannot starve CPU 0 IDLE0 TWDT.
+  if ((chunksRead & 0xFu) != 0u) {
+    vTaskDelay(1);
+  }
+#endif
 
   pendingCr = false;
   if (lineOverflowed) {

@@ -4,6 +4,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <string_view>
 
 #include "FlashcardTypes.h"
 
@@ -17,11 +19,13 @@ class FlashcardDeckIndex {
   FlashcardDeckIndex& operator=(const FlashcardDeckIndex&) = delete;
 
   static bool ensureDir(const char* dirPath);
+  static void buildIndexPath(const char* cacheDir, std::string_view deckPath, std::string& outIdxPath);
+  static bool removeIndex(const char* cacheDir, std::string_view deckPath);
 
   bool openOrBuild(const char* jsonlPath, const char* idxPath);
   void close();
-  bool isOpen() const { return opened; }
-  const DeckIndexHeader& header() const { return head; }
+  bool isOpen() const noexcept { return opened; }
+  const DeckIndexHeader& header() const noexcept { return head; }
 
   bool readIndexRecord(uint32_t ordinal, CardIndexRecord& out);
   bool readIndexRecords(uint32_t startOrdinal, CardIndexRecord* outBuf, size_t count);

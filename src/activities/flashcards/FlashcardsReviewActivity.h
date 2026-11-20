@@ -1,11 +1,9 @@
 #pragma once
 
 #include <EpdFontFamily.h>
-#include <FlashcardScheduler.h>
 #include <FlashcardSession.h>
 #include <FlashcardTypes.h>
 
-#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -18,7 +16,7 @@
 class FlashcardsReviewActivity final : public Activity {
  public:
   explicit FlashcardsReviewActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string deckPath,
-                                    bool allowFastInitialRefresh = false);
+                                    bool shuffleCards = true);
 
   void onEnter() override;
   void onExit() override;
@@ -26,13 +24,12 @@ class FlashcardsReviewActivity final : public Activity {
   void loop() override;
   void render(RenderLock&& lock) override;
   bool handleForcedRefresh() override;
-  bool handleHomeGesture() override;
 
  private:
   enum class State : uint8_t {
     CardFront,
     CardBack,
-    SessionComplete,
+    DeckComplete,
   };
 
   struct AnswerLine {
@@ -48,19 +45,14 @@ class FlashcardsReviewActivity final : public Activity {
     uint16_t lineCount = 0;
   };
 
+  void clearHitRects() noexcept;
   bool loadActiveCardState();
-  void populateSessionCompleteMetrics();
-  void enterSessionCompleteState();
-  void clearSleepResumeState();
-  void saveSleepResumeStateIfReady();
+  void enterDeckCompleteState();
   void exitToDeckList();
   void flipToBack();
-  void stepFocusedRating(int delta);
-  void submitActiveRating(flashcards::Rating rating);
-  void submitFreeReviewChoice(bool repeatAgain);
-  void stepCompleteFocus(int delta);
-  void beginFreeReview();
-  void advanceToNextSession();
+  void stepFocusedChoice(int delta);
+  void submitActiveChoice(bool repeatAgain);
+  void restartDeckPass();
   bool stepAnswerPage(int delta);
   void ensureCardLayout(const Rect& promptBandRect, int answerWidth, int answerAvailHeight,
                         int paginationReserveHeight);
@@ -68,20 +60,17 @@ class FlashcardsReviewActivity final : public Activity {
 
   void renderCardFront(const Rect& safeArea, const Rect& headerRect);
   void renderCardBack(const Rect& safeArea, const Rect& headerRect);
-  void renderSessionComplete(const Rect& safeArea, const Rect& headerRect);
+  void renderDeckComplete(const Rect& safeArea, const Rect& headerRect);
   void renderPromptBand(const Rect& promptBandRect) const;
   void scanPromptBandGlyphs() const;
   void scanAnswerPageGlyphs(uint16_t pageIdx) const;
 
   std::string deckPath;
-  bool allowFastInitialRefresh = false;
+  bool shuffleCards = true;
   std::unique_ptr<flashcards::FlashcardSession> session;
   State state = State::CardFront;
 
   flashcards::FlashcardItem currentCardData;
-  flashcards::CardSrsRecord currentSrs;
-  flashcards::IntervalPreview currentPreview;
-  flashcards::Rating focusedRating = flashcards::Rating::Good;
 
   std::vector<std::string> promptLines;
   std::vector<std::string> hintLines;
@@ -89,31 +78,23 @@ class FlashcardsReviewActivity final : public Activity {
   std::vector<AnswerLine> answerLines;
   std::vector<AnswerPageSpan> answerPages;
   uint16_t extraPage = 0;
+  int layoutPromptHeight = 0;
   int layoutWidth = 0;
   int layoutHeight = 0;
   bool cardLayoutValid = false;
 
-  uint16_t nextDueCount = 0;
-  uint16_t nextNewCount = 0;
-  uint16_t nextScheduledDueDay = 0;
-  uint16_t freeReviewCount = 0;
-  uint32_t nextSessionDay = 1;
-
   int cardsUntilFullRefresh = 0;
+  uint8_t appliedOrientation = 0;
   bool forcedRefreshPending = false;
   bool suppressConfirmRelease = false;
   bool suppressBackRelease = false;
   bool loadFailed = false;
-  bool reviewStateSaved = false;
-  bool freeReviewFocusGotIt = true;
-  bool focusFreeReviewOnComplete = false;
-  std::atomic<bool> firstReviewFrameRendered{false};
+  bool focusGotIt = true;
 
   ButtonNavigator buttonNavigator;
 
   Rect showAnswerPillRect;
   Rect cardTapBodyRect;
-  Rect ratingPillRects[4];
-  Rect freeReviewPillRect;
-  Rect nextSessionPillRect;
+  Rect pillRects[2];
+  Rect practiceAgainPillRect;
 };

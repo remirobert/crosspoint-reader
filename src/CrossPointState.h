@@ -14,27 +14,15 @@ class CrossPointState : public PersistableStore<CrossPointState> {
   static constexpr uint8_t SLEEP_AVOID_REPEAT_LOOKBACK = 5;
 
   std::string openEpubPath;
-  std::string openFlashcardsPath;
   uint32_t sleepLcgCount = 0;
   uint32_t sleepLcgState = 0;
   uint32_t sleepOverlayLcgCount = 0;
   uint32_t sleepOverlayLcgState = 0;
   uint8_t readerActivityLoadCount = 0;
-  uint8_t flashcardsActivityLoadCount = 0;
   bool lastSleepFromReader = false;
-  bool lastSleepFromFlashcards = false;
   bool showBootScreen = true;
 
   static const char* getFilePath() { return "/.crosspoint/state.json"; }
-
-  // Returns true if any Flashcards resume field changed, so callers save only when dirty.
-  bool clearFlashcardsResume() {
-    const bool dirty = !openFlashcardsPath.empty() || lastSleepFromFlashcards || flashcardsActivityLoadCount != 0;
-    openFlashcardsPath.clear();
-    lastSleepFromFlashcards = false;
-    flashcardsActivityLoadCount = 0;
-    return dirty;
-  }
   void toJson(JsonDocument& doc) const;
   bool fromJson(JsonVariantConst doc);
 

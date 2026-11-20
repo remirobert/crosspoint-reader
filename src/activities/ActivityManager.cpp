@@ -20,7 +20,6 @@
 #include "browser/OpdsBookBrowserActivity.h"
 #include "components/HeaderBackTapTarget.h"
 #include "flashcards/FlashcardsDeckListActivity.h"
-#include "flashcards/FlashcardsReviewActivity.h"
 #include "home/CrashActivity.h"
 #include "home/FileBrowserActivity.h"
 #include "home/HomeActivity.h"
@@ -313,18 +312,7 @@ void ActivityManager::goToLibrary() {
   replaceActivity(std::move(activity));
 }
 
-void ActivityManager::goToFlashcards(std::string deckPath, const bool allowFastInitialRefresh) {
-  if (!deckPath.empty()) {
-    auto activity = makeUniqueNoThrow<FlashcardsReviewActivity>(renderer, mappedInput, std::move(deckPath),
-                                                                allowFastInitialRefresh);
-    if (!activity) {
-      LOG_ERR("ACT", "OOM: Flashcards review activity (%zu bytes)", sizeof(FlashcardsReviewActivity));
-      return;
-    }
-    replaceActivity(std::move(activity));
-    return;
-  }
-
+void ActivityManager::goToFlashcards() {
   auto activity = makeUniqueNoThrow<FlashcardsDeckListActivity>(renderer, mappedInput);
   if (!activity) {
     LOG_ERR("ACT", "OOM: Flashcards deck list activity (%zu bytes)", sizeof(FlashcardsDeckListActivity));
@@ -433,12 +421,6 @@ bool ActivityManager::isReaderActivity() const {
   return std::any_of(stackActivities.begin(), stackActivities.end(),
                      [](const auto& activity) { return activity->isReaderActivity(); }) ||
          (currentActivity && currentActivity->isReaderActivity());
-}
-
-bool ActivityManager::isFlashcardsReviewActivity() const {
-  return std::any_of(stackActivities.begin(), stackActivities.end(),
-                     [](const auto& activity) { return activity->name == "FlashcardsReview"; }) ||
-         (currentActivity && currentActivity->name == "FlashcardsReview");
 }
 
 bool ActivityManager::isForegroundReader() const {

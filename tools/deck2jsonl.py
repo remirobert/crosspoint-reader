@@ -21,10 +21,6 @@ ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 SQLITE_MAGIC = b"SQLite format 3\x00"
 NOTE_FIELD_SEP = "\x1f"
 
-DEFAULT_NEW_PER_DAY = 20
-MAX_NEW_PER_DAY = 200
-DEFAULT_MAX_REVIEWS = 200
-MAX_REVIEWS_CAP = 500
 MAX_JSONL_LINE_BYTES = 4096
 MAX_LINE_CONTENT_BYTES = MAX_JSONL_LINE_BYTES - 1
 
@@ -82,17 +78,13 @@ def _serialize_compact(obj: dict[str, object]) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
 
-def format_meta_line(title: str, new_per_day: int, max_reviews: int) -> str:
+def format_meta_line(title: str) -> str:
     """Format line 1 deck metadata JSON object."""
-    clamped_new = max(0, min(MAX_NEW_PER_DAY, new_per_day))
-    clamped_reviews = max(1, min(MAX_REVIEWS_CAP, max_reviews))
     clean_title = title.strip() or "Deck"
     return _serialize_compact(
         {
             "_meta": True,
             "title": clean_title,
-            "newPerDay": clamped_new,
-            "maxReviews": clamped_reviews,
         }
     )
 
@@ -662,8 +654,6 @@ def convert_deck(
     output_path: Path,
     *,
     title: str | None = None,
-    new_per_day: int = DEFAULT_NEW_PER_DAY,
-    max_reviews: int = DEFAULT_MAX_REVIEWS,
     front_field: str | None = None,
     back_field: str | None = None,
     hint_field: str | None = None,
@@ -724,11 +714,7 @@ def convert_deck(
         if (title is not None and title.strip())
         else (detected_title or input_path.stem)
     )
-    meta_line = format_meta_line(
-        title=effective_title,
-        new_per_day=new_per_day,
-        max_reviews=max_reviews,
-    )
+    meta_line = format_meta_line(title=effective_title)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8", newline="\n") as out:
@@ -739,26 +725,6 @@ def convert_deck(
             out.write("\n")
 
     return len(card_lines)
-
-
-def _non_negative_int(value: str) -> int:
-    try:
-        parsed = int(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"invalid integer value: '{value}'") from exc
-    if parsed < 0:
-        raise argparse.ArgumentTypeError("value must be >= 0")
-    return parsed
-
-
-def _positive_int(value: str) -> int:
-    try:
-        parsed = int(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"invalid integer value: '{value}'") from exc
-    if parsed < 1:
-        raise argparse.ArgumentTypeError("value must be >= 1")
-    return parsed
 
 
 def _validate_field_arg(value: str) -> str:
@@ -800,18 +766,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Deck display title for _meta (defaults to package deck name or input filename stem).",
-    )
-    parser.add_argument(
-        "--new-per-day",
-        type=_non_negative_int,
-        default=DEFAULT_NEW_PER_DAY,
-        help=f"New cards per session day (default: {DEFAULT_NEW_PER_DAY}, max: {MAX_NEW_PER_DAY}).",
-    )
-    parser.add_argument(
-        "--max-reviews",
-        type=_positive_int,
-        default=DEFAULT_MAX_REVIEWS,
-        help=f"Maximum due reviews per session day (default: {DEFAULT_MAX_REVIEWS}, max: {MAX_REVIEWS_CAP}).",
     )
     parser.add_argument(
         "--front-field",
@@ -866,8 +820,6 @@ def main(argv: list[str] | None = None) -> int:
             input_path=args.input,
             output_path=out_path,
             title=args.title,
-            new_per_day=args.new_per_day,
-            max_reviews=args.max_reviews,
             front_field=args.front_field,
             back_field=args.back_field,
             hint_field=args.hint_field,

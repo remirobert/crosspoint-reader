@@ -212,10 +212,6 @@ class Deck2JsonlTest(unittest.TestCase):
                     str(out_path),
                     "--title",
                     "Japanese Core 2k",
-                    "--new-per-day",
-                    "25",
-                    "--max-reviews",
-                    "150",
                     "--front-field",
                     "Kanji",
                     "--back-field",
@@ -232,7 +228,7 @@ class Deck2JsonlTest(unittest.TestCase):
         self.assertEqual(
             lines,
             [
-                '{"_meta":true,"title":"Japanese Core 2k","newPerDay":25,"maxReviews":150}',
+                '{"_meta":true,"title":"Japanese Core 2k"}',
                 (
                     '{"id":"1001","front":"食べる","back":"to eat\\nto consume",'
                     '"hint":"たべる","extra":"毎日野菜を食べる。\\nI eat veggies & fruit."}'
@@ -289,7 +285,7 @@ class Deck2JsonlTest(unittest.TestCase):
         self.assertEqual(
             lines,
             [
-                '{"_meta":true,"title":"French Essentials","newPerDay":20,"maxReviews":200}',
+                '{"_meta":true,"title":"French Essentials"}',
                 '{"id":"9001","front":"Bonjour !","back":"Hello!","extra":"Formal & polite greeting"}',
             ],
         )
@@ -323,7 +319,7 @@ class Deck2JsonlTest(unittest.TestCase):
         self.assertEqual(
             lines,
             [
-                '{"_meta":true,"title":"cats","newPerDay":20,"maxReviews":200}',
+                '{"_meta":true,"title":"cats"}',
                 '{"id":"n5-001","front":"猫","back":"cat"}',
             ],
         )
@@ -394,7 +390,7 @@ class Deck2JsonlTest(unittest.TestCase):
         self.assertEqual(
             lines,
             [
-                '{"_meta":true,"title":"vocab","newPerDay":20,"maxReviews":200}',
+                '{"_meta":true,"title":"vocab"}',
                 (
                     '{"front":"食べる","back":"to eat\\nconsume",'
                     '"hint":"たべる","extra":"毎日野菜を食べる。"}'
@@ -422,7 +418,7 @@ class Deck2JsonlTest(unittest.TestCase):
         self.assertEqual(
             export_out.read_text(encoding="utf-8").splitlines(),
             [
-                '{"_meta":true,"title":"Kanji N5","newPerDay":20,"maxReviews":200}',
+                '{"_meta":true,"title":"Kanji N5"}',
                 '{"id":"g-001","front":"山","back":"mountain"}',
                 '{"id":"g-002","front":"川","back":"river"}',
             ],
@@ -462,7 +458,7 @@ class Deck2JsonlTest(unittest.TestCase):
         self.assertEqual(len(lines), 2)
         self.assertEqual(
             lines[0],
-            '{"_meta":true,"title":"CSV Deck","newPerDay":20,"maxReviews":200}',
+            '{"_meta":true,"title":"CSV Deck"}',
         )
         raw_bytes = lines[1].encode("utf-8")
         self.assertLessEqual(len(raw_bytes), 4095)

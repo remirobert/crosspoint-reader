@@ -13,9 +13,7 @@ endif()
 
 add_executable(FlashcardsTest
   FlashcardsTest.cpp
-  ${REPO_ROOT}/lib/Flashcards/FlashcardScheduler.cpp
   ${REPO_ROOT}/lib/Flashcards/FlashcardDeckIndex.cpp
-  ${REPO_ROOT}/lib/Flashcards/FlashcardSrsStore.cpp
   ${REPO_ROOT}/lib/Flashcards/FlashcardSession.cpp
 )
 

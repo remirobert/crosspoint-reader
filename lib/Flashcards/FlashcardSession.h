@@ -6,24 +6,17 @@
 #include <vector>
 
 #include "FlashcardDeckIndex.h"
-#include "FlashcardScheduler.h"
-#include "FlashcardSrsStore.h"
 #include "FlashcardTypes.h"
 
 namespace flashcards {
 
 struct SessionSlot {
   uint32_t cardOrdinal = 0;
-  CardSrsRecord srs{};
+  bool drilling = false;
 };
 
 struct DeckSummary {
-  uint16_t dueCount = 0;
-  uint16_t newCount = 0;
   uint32_t totalCards = 0;
-  uint32_t sessionDay = 1;
-  bool sessionCompleted = false;
-  uint16_t newPerDay = DEFAULT_NEW_PER_DAY;
   char title[64]{};
 };
 
@@ -42,48 +35,38 @@ class FlashcardSession {
     return inspectDeck(jsonlPath, "/.crosspoint/flashcards", out);
   }
 
-  bool open(const char* jsonlPath, const char* cacheDir = "/.crosspoint/flashcards");
+  bool open(const char* jsonlPath, bool shuffle = true, uint32_t seed = 0,
+            const char* cacheDir = "/.crosspoint/flashcards");
   void close();
 
-  bool isOpen() const { return opened; }
-  bool isFreeReview() const noexcept { return opened && freeReviewActive; }
-  bool isSessionComplete() const { return opened && !freeReviewActive && srs.header().sessionCompleted != 0; }
-  size_t remainingCount() const { return queue.size(); }
-  uint32_t totalDeckCards() const { return opened ? deckIndex.header().cardCount : 0; }
-  uint32_t sessionDay() const { return opened ? srs.header().currentSessionDay : 1; }
-  uint32_t reviewsThisSession() const { return opened ? srs.header().reviewsThisSession : 0; }
-  uint32_t freeReviewRatingsCount() const noexcept { return freeReviewsCompleted; }
-  bool lastPassWasFreeReview() const noexcept { return lastCompletedFree; }
-  const char* deckTitle() const { return deckIndex.header().title; }
-  uint16_t effectiveNewPerDay() const {
-    return opened ? srs.effectiveNewPerDay(deckIndex.header().newPerDay) : DEFAULT_NEW_PER_DAY;
-  }
+  bool restartPass(bool shuffle = true, uint32_t seed = 0);
 
-  bool setNewPerDayOverride(uint16_t limit);
-  uint32_t computeNextSessionDay() const;
-  void previewNextSession(uint16_t& outDue, uint16_t& outNew, uint16_t* outNextScheduledDay = nullptr) const;
-  uint16_t countFreeReviewCards() const;
+  bool isOpen() const noexcept { return opened; }
+  bool isPassComplete() const noexcept { return opened && passComplete; }
+  bool isShuffled() const noexcept { return shuffledPass; }
+  size_t remainingCount() const noexcept;
+  uint32_t totalDeckCards() const noexcept { return opened ? deckIndex.header().cardCount : 0; }
+  const char* deckTitle() const noexcept { return deckIndex.header().title; }
 
-  bool currentCard(FlashcardItem& outCard, CardSrsRecord& outSrs, IntervalPreview& outPreview);
-  bool submitRating(Rating rating);
-  bool startFreeReview();
-  bool submitFreeReview(bool repeatAgain);
-  bool startNextSession();
+  SessionProgress sessionProgress() const noexcept;
+  PassSummary passSummary() const noexcept;
 
-  const FlashcardSrsStore& srsStore() const { return srs; }
-  const FlashcardDeckIndex& index() const { return deckIndex; }
+  bool currentCard(FlashcardItem& outCard);
+  bool submitChoice(bool repeatAgain);
+
+  const FlashcardDeckIndex& index() const noexcept { return deckIndex; }
 
  private:
-  bool rebuildQueue();
-
-  mutable FlashcardDeckIndex deckIndex;
-  FlashcardSrsStore srs;
+  FlashcardDeckIndex deckIndex;
   std::vector<SessionSlot> queue;
+  std::unique_ptr<uint16_t[]> orderBuf;
   std::unique_ptr<char[]> lineBuf;
-  uint32_t freeReviewsCompleted = 0;
+  PassSummary summary{};
+  uint32_t nextStreamCursor = 0;
+  uint16_t clearedCount = 0;
   bool opened = false;
-  bool freeReviewActive = false;
-  bool lastCompletedFree = false;
+  bool passComplete = false;
+  bool shuffledPass = false;
 };
 
 }  // namespace flashcards
